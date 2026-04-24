@@ -20,7 +20,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-from campos_gesfo import (
+from domain.campos import (
     CAMPOS_OT, SPEC_CAMPOS, HARDCODEADOS, ANCHOS_COLUMNAS,
     WORKLOG_CAMPOS, ANCHOS_WORKLOG,
 )

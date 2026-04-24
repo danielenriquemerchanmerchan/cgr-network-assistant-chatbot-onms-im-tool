@@ -7,7 +7,7 @@ Logica pura de transformacion: convierte la respuesta de Maximo
 Sin dependencias de red, BD ni de formato de salida.
 """
 
-from campos_gesfo import (
+from domain.campos import (
     CAMPOS_OT, SPEC_CAMPOS, CAMPOS_FECHA, CAMPOS_STR_FORZADO,
 )
 

@@ -8,7 +8,7 @@ a registros planos listos para exportar.
 Sin dependencias de red, BD ni de formato de salida.
 """
 
-from campos_gesfo import WORKLOG_CAMPOS, WORKLOG_CAMPOS_FECHA
+from domain.campos import WORKLOG_CAMPOS, WORKLOG_CAMPOS_FECHA
 
 
 def construir_registros_worklog(wonum, worklogs_crudos):

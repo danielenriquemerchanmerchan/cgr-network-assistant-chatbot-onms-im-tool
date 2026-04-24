@@ -574,16 +574,22 @@ def adjuntar_url(wonum, url, descripcion=""):
 # 7. EXTRACCION EN LOTE: LISTAR OTs (PAGINACION COMPLETA)
 # ══════════════════════════════════════════════════════════════
 
-def listar_ots(ownergroup, classstructureid, page_size=PAGE_SIZE_DEFAULT, select=None):
+def listar_ots(ownergroup, classstructureid, page_size=PAGE_SIZE_DEFAULT, select=None, max_members=20):
     """
     Extrae TODAS las OTs que matchean los filtros, iterando todas las paginas.
     Usada por tabla_maestra_4213.py y otros ETL masivos.
+
+    Cada pagina hace un request HTTP y cierra la sesion inmediatamente
+    (importante para no dejar sesiones huerfanas en Maximo).
 
     Parametros:
         ownergroup       (str): grupo propietario. Ej: 'O_GESFO'
         classstructureid (str): ID de clasificacion. Ej: '4213'
         page_size        (int): tamanyo de pagina (default config)
         select           (str): campos a traer en la coleccion (default minimo)
+        max_members      (int, opcional): limite de OTs a retornar. Si se alcanza,
+                         detiene la paginacion. Util para pruebas rapidas.
+                         None (default) = traer todas las paginas.
 
     Retorna:
         list[dict] con los members de todas las paginas, o [] si hay error.
@@ -597,8 +603,9 @@ def listar_ots(ownergroup, classstructureid, page_size=PAGE_SIZE_DEFAULT, select
     all_members = []
     pagina = 1
 
-    try:
-        while True:
+    while True:
+        r = None
+        try:
             url = (
                 f"{URL_BASE}?lean=1"
                 f'&oslc.where=ownergroup="{ownergroup}" '
@@ -631,12 +638,23 @@ def listar_ots(ownergroup, classstructureid, page_size=PAGE_SIZE_DEFAULT, select
                 f"{len(members)} OTs (acumulado: {len(all_members)}/{total})"
             )
 
+            # Cortar si se alcanzo el limite solicitado
+            if max_members is not None and len(all_members) >= max_members:
+                all_members = all_members[:max_members]
+                logging.info(f"Limite max_members={max_members} alcanzado, deteniendo paginacion")
+                break
+
             if pagina >= total_pages:
                 break
             pagina += 1
 
-    except Exception as e:
-        logging.error(f"Error listando OTs {ownergroup}/{classstructureid}: {e}")
+        except Exception as e:
+            logging.error(f"Error listando OTs pagina {pagina}: {e}")
+            break
+
+        finally:
+            if r is not None:
+                _cerrar_sesion(r)
 
     return all_members
 
@@ -650,12 +668,16 @@ def obtener_detalle_ot(href):
     Descarga el detalle completo de una OT desde su href.
     Incluye workorderspec, worklog, wostatus y todos los campos.
 
+    Cierra la sesion inmediatamente despues de obtener la respuesta
+    (importante para no dejar sesiones huerfanas en Maximo).
+
     Parametros:
         href (str): URL completa de la OT (campo href del listado)
 
     Retorna:
         dict con todos los campos y sub-colecciones, o None si hay error.
     """
+    r = None
     try:
         r = requests.get(
             href,
@@ -670,6 +692,9 @@ def obtener_detalle_ot(href):
     except Exception as e:
         logging.error(f"Error obteniendo detalle de OT en {href}: {e}")
         return None
+    finally:
+        if r is not None:
+            _cerrar_sesion(r)
 
 # ══════════════════════════════════════════════════════════════
 # 9. EXTRACCION EN LOTE: DESCRIPCION DE CI (con cache)
@@ -679,6 +704,9 @@ def obtener_ci_description(cinum, cache=None):
     """
     Consulta la descripcion de un CI. Usa cache dict compartido
     entre llamadas para evitar requests redundantes.
+
+    Cierra la sesion inmediatamente despues del request
+    (importante para no dejar sesiones huerfanas en Maximo).
 
     Parametros:
         cinum (str): numero del CI
@@ -693,6 +721,8 @@ def obtener_ci_description(cinum, cache=None):
     if cache is not None and cinum in cache:
         return cache[cinum]
 
+    r = None
+    desc = ""
     try:
         r = requests.get(
             f'{URL_CI}?lean=1'
@@ -706,7 +736,9 @@ def obtener_ci_description(cinum, cache=None):
         desc = members[0].get("description", "") if members else ""
     except Exception as e:
         logging.warning(f"Error consultando CI {cinum}: {e}")
-        desc = ""
+    finally:
+        if r is not None:
+            _cerrar_sesion(r)
 
     if cache is not None:
         cache[cinum] = desc
@@ -717,6 +749,18 @@ def obtener_ci_description(cinum, cache=None):
 # ══════════════════════════════════════════════════════════════
 
 def extraer_worklogs_inline(detalle):
+    """
+    Extrae los worklogs que vienen inline en el detalle de la OT
+    (clave 'worklog' como list). No hace requests adicionales.
+
+    Parametros:
+        detalle (dict): response de obtener_detalle_ot()
+
+    Retorna:
+        list[dict] con los worklogs crudos tal como vienen de Maximo,
+        o [] si la OT no tiene avances.
+    """
+    return detalle.get("worklog", []) or []
     """
     Extrae los worklogs que vienen inline en el detalle de la OT
     (clave 'worklog' como list). No hace requests adicionales.

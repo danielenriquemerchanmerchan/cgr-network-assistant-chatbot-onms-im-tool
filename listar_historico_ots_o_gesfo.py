@@ -65,6 +65,7 @@ def extraer_registros(ownergroup, classstructureid, page_size=MAXIMO_PAGE_SIZE):
     logging.info(f"Consultando OTs {ownergroup} / classstructureid={classstructureid}")
 
     members = listar_ots(ownergroup, classstructureid, page_size=page_size)
+    members = members[:20] # TEMPORAL: solo primeras 20 para prueba
     total   = len(members)
     logging.info(f"Total OTs obtenidas del listado: {total}")
 

@@ -16,6 +16,7 @@ from config import PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE
 from campos_gesfo import CAMPOS_OT, SPEC_CAMPOS
 from exporters.base import Exporter
 
+
 class PostgresExporter(Exporter):
     """Upsert de registros a una tabla PostgreSQL."""
 

@@ -38,51 +38,14 @@ MAXIMO_PASSWORD = os.getenv("MAXIMO_PASSWORD")
 # Timeout en segundos
 MAXIMO_TIMEOUT  = int(os.getenv("MAXIMO_TIMEOUT", "30"))
 
-
-# ══════════════════════════════════════════════════════════════
-# MAXIMO — CONSTANTES DE NEGOCIO (no son secretos)
-# ══════════════════════════════════════════════════════════════
-
-MAXIMO_GRUPO           = "O_GESFO"
-MAXIMO_ESTADOS_EXCLUIR = ["COMP", "CLOSE", "CAN", "HIST"]
-MAXIMO_WOCLASS         = ["WORKORDER", "CHANGE"]
-
 # Paginacion para extracciones masivas
 MAXIMO_PAGE_SIZE = 200
-
-# Diccionario de clasificaciones de OT
-MAXIMO_CLASIFICACIONES = {
-    "CORRECTIVO": {
-        "classstructureid": "4213",
-        "description_class": "RED DE ACCESO FO OYM \\ MTTO. CORRECTIVO \\ INCIDENCIA",
-        "worktype": "MC"
-    },
-    "PREVENTIVO": {
-        "classstructureid": "4215",
-        "description_class": "RED DE ACCESO FO OYM \\ MTTO. PREVENTIVO \\ ASEGURAMIENTO",
-        "worktype": "MP"
-    },
-    "GENERICA": {
-        "classstructureid": "1885",
-        "description_class": "FALLAS \\ GENERICA",
-        "worktype": "EM"
-    },
-    "PERFORMANCE": {
-        "classstructureid": "1886",
-        "description_class": "FALLAS \\ PERFORMANCE",
-        "worktype": "EM"
-    },
-    "OUTAGE": {
-        "classstructureid": "1887",
-        "description_class": "FALLAS \\ OUTAGE",
-        "worktype": "EM"
-    },
-}
 
 
 # ══════════════════════════════════════════════════════════════
 # MAXIMO ORACLE DB
 # ══════════════════════════════════════════════════════════════
+
 
 ORACLE_USER = os.getenv("ORACLE_USER")
 ORACLE_PSW  = os.getenv("ORACLE_PSW")
@@ -145,3 +108,50 @@ PTM_PASSWORD = os.getenv("PTM_PASSWORD")
 
 ROSE_USER     = os.getenv("ROSE_USER")
 ROSE_PASSWORD = os.getenv("ROSE_PASSWORD")
+
+
+
+# ══════════════════════════════════════════════════════════════
+# CONSTANTES HISTORICAS — revisar si todavia aplican
+# ══════════════════════════════════════════════════════════════
+# Estas variables estaban en config.py pero al 2026-04-23 no se
+# usan en ningun archivo del proyecto. Se dejan comentadas por
+# si son referencia para futuro. Eliminar si en 6 meses siguen
+# sin usarse.
+
+# ══════════════════════════════════════════════════════════════
+# MAXIMO — CONSTANTES DE NEGOCIO (no son secretos)
+# ══════════════════════════════════════════════════════════════
+
+MAXIMO_GRUPO           = "O_GESFO"
+MAXIMO_ESTADOS_EXCLUIR = ["COMP", "CLOSE", "CAN", "HIST"]
+MAXIMO_WOCLASS         = ["WORKORDER", "CHANGE"]
+
+# Diccionario de clasificaciones de OT
+MAXIMO_CLASIFICACIONES = {
+    "CORRECTIVO": {
+        "classstructureid": "4213",
+        "description_class": "RED DE ACCESO FO OYM \\ MTTO. CORRECTIVO \\ INCIDENCIA",
+        "worktype": "MC"
+    },
+    "PREVENTIVO": {
+        "classstructureid": "4215",
+        "description_class": "RED DE ACCESO FO OYM \\ MTTO. PREVENTIVO \\ ASEGURAMIENTO",
+        "worktype": "MP"
+    },
+    "GENERICA": {
+        "classstructureid": "1885",
+        "description_class": "FALLAS \\ GENERICA",
+        "worktype": "EM"
+    },
+    "PERFORMANCE": {
+        "classstructureid": "1886",
+        "description_class": "FALLAS \\ PERFORMANCE",
+        "worktype": "EM"
+    },
+    "OUTAGE": {
+        "classstructureid": "1887",
+        "description_class": "FALLAS \\ OUTAGE",
+        "worktype": "EM"
+    },
+}

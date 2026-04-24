@@ -24,7 +24,7 @@ from maximo_wo import (
     extraer_worklogs_inline,
 )
 from ot_transformer import construir_registro
-from base import Exporter
+from exporters.base import Exporter
 from excel_exporter import ExcelExporter
 # from mysql_exporter    import MySQLExporter
 # from postgres_exporter import PostgresExporter

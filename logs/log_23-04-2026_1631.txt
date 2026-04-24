@@ -1,0 +1,6 @@
+"2026-04-23 16:31:14,596 ; root ; INFO ; Consultando OTs O_GESFO / classstructureid=4213"
+"2026-04-23 16:31:15,587 ; root ; INFO ; Maximo listar_ots pagina 1/133: 200 OTs (acumulado: 200/26528)"
+"2026-04-23 16:31:16,700 ; root ; INFO ; Maximo listar_ots pagina 2/133: 200 OTs (acumulado: 400/26528)"
+"2026-04-23 16:31:17,722 ; root ; INFO ; Maximo listar_ots pagina 3/133: 200 OTs (acumulado: 600/26528)"
+"2026-04-23 16:31:18,743 ; root ; INFO ; Maximo listar_ots pagina 4/133: 200 OTs (acumulado: 800/26528)"
+"2026-04-23 16:31:19,789 ; root ; INFO ; Maximo listar_ots pagina 5/133: 200 OTs (acumulado: 1000/26528)"

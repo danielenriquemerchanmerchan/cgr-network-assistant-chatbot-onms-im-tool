@@ -1,0 +1,8 @@
+"2026-04-08 11:59:53,457 ; httpx ; INFO ; HTTP Request: POST https://api.telegram.org/bot7359250833:AAFTwh35Tp9-1qIIiGY9AMpq2m2tcai01-k/getMe "HTTP/1.1 200 OK""
+"2026-04-08 11:59:53,662 ; httpx ; INFO ; HTTP Request: POST https://api.telegram.org/bot7359250833:AAFTwh35Tp9-1qIIiGY9AMpq2m2tcai01-k/deleteWebhook "HTTP/1.1 200 OK""
+"2026-04-08 11:59:53,663 ; telegram.ext.Application ; INFO ; Application started"
+"2026-04-08 12:00:03,597 ; httpx ; INFO ; HTTP Request: POST https://api.telegram.org/bot7359250833:AAFTwh35Tp9-1qIIiGY9AMpq2m2tcai01-k/getUpdates "HTTP/1.1 200 OK""
+"2026-04-08 12:00:13,788 ; httpx ; INFO ; HTTP Request: POST https://api.telegram.org/bot7359250833:AAFTwh35Tp9-1qIIiGY9AMpq2m2tcai01-k/getUpdates "HTTP/1.1 200 OK""
+"2026-04-08 12:00:23,992 ; httpx ; INFO ; HTTP Request: POST https://api.telegram.org/bot7359250833:AAFTwh35Tp9-1qIIiGY9AMpq2m2tcai01-k/getUpdates "HTTP/1.1 200 OK""
+"2026-04-08 12:00:34,177 ; httpx ; INFO ; HTTP Request: POST https://api.telegram.org/bot7359250833:AAFTwh35Tp9-1qIIiGY9AMpq2m2tcai01-k/getUpdates "HTTP/1.1 200 OK""
+"2026-04-08 12:00:44,359 ; httpx ; INFO ; HTTP Request: POST https://api.telegram.org/bot7359250833:AAFTwh35Tp9-1qIIiGY9AMpq2m2tcai01-k/getUpdates "HTTP/1.1 200 OK""

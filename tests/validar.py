@@ -1,15 +1,24 @@
 """
-validar_worklogs.py
--------------------
-Script de validacion: consulta UNA OT real de Maximo e inspecciona
-la estructura del JSON para ver como llegan los worklogs.
+validar.py
+----------
+Script de validacion manual del pipeline ETL.
 
-No modifica nada, solo imprime.
+ESTADO ACTUAL: REFERENCIA / PRUEBA AD-HOC
+    Sirvio durante el desarrollo para verificar manualmente que el
+    transformer producia el output esperado a partir de un JSON real.
 
-Uso:
-    py validar_worklogs.py [WONUM_OPCIONAL]
+USO ACTUAL:
+    Ejecutar como modulo desde la raiz del proyecto:
+        py -m tests.validar
 
-Si no se pasa wonum, toma la primera OT activa de O_GESFO.
+    Puede servir para validaciones puntuales: probar un campo nuevo
+    agregado a campos.py, verificar el comportamiento con una OT
+    especifica, debuggear sin esperar al pipeline completo.
+
+USO FUTURO:
+    Cuando el proyecto requiera tests automaticos (con pytest u otro
+    framework), este archivo se reemplazara por tests propiamente
+    dichos en tests/test_*.py que usen los fixtures de tests/fixtures/.
 """
 
 import sys
@@ -17,7 +26,7 @@ import json
 import requests
 from requests.auth import HTTPBasicAuth
 
-from config import (
+from core.config import (
     MAXIMO_URL as URL_WO,
     MAXIMO_USER as USERNAME,
     MAXIMO_PASSWORD as PASSWORD,

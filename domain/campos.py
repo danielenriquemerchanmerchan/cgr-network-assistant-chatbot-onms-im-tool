@@ -1,10 +1,51 @@
 """
-campos_gesfo.py
----------------
-Definiciones de campos, specifications y metadatos del dominio
-OT GESFO (ownergroup=O_GESFO, classstructureid=4213).
+campos.py
+---------
+Diccionario de definición de campos para OTs de O_GESFO (classstructureid=4213).
 
-Separado de config.py porque son constantes de negocio, no configuracion.
+QUE ES:
+    Define cuales campos componen el OUTPUT del proyecto (Excel, MySQL, Postgres).
+    No define que se le pide a Maximo --- eso vive en integrations/maximo/client.py.
+    De hecho a maximo se le esta consultando todo. 
+    Ejemplo:
+    Imagina que recibes un camión con 181 cajas(consulta maximo), pero solo necesitas 32 para tu inventario.
+    Las 181 cajas son lo que Maximo te envía en el detalle (el JSON gigante)
+    La lista de 32 cajas que necesitas está aquí en este archivo campos.py
+    El trabajador (transformer) del muelle solo descarga las 32 cajas que necesitas y deja las otras 149 en el camión 
+    
+
+POR QUE EXISTE COMO ARCHIVO APARTE:
+    Si los nombres de campos estuvieran dispersos en transformers, exporters y otros
+    modulos, agregar/quitar un campo requeriria editar varios archivos. Aqui es UN
+    SOLO LUGAR para todas las definiciones del modelo de datos.
+
+QUE CONTIENE:
+    - CAMPOS_OT          : campos top-level de la OT (wonum, status, location, etc.)
+    - SPEC_CAMPOS        : campos del array workorderspec (TIPO_TRAMO, OPERADOR_FO, etc.)
+    - HARDCODEADOS       : specs cuyos valores son predefinidos (se colocan por defecto)
+    - WORKLOG_CAMPOS     : campos de cada worklog (avance) plano
+    - CAMPOS_FECHA       : campos que se truncan a 19 chars (fechas ISO)
+    - CAMPOS_STR_FORZADO : campos que se castean a str aunque vengan numericos
+    - ANCHOS_COLUMNAS    : ancho de columna en Excel para cada campo
+    - ANCHOS_WORKLOG     : ancho de columna en Excel para cada campo de worklog
+
+COMO INTERACTUA:
+    Este archivo campos.py
+    - Lo lee transformers/ot.py para saber que campos extraer del JSON de Maximo
+    - Lo lee transformers/worklog.py para saber que campos extraer de cada worklog
+    - Lo leen los exporters (excel.py, mysql.py postgres.py) para saber que columnas crear
+
+REGLA DE ORO:
+    Los nombres en CAMPOS_OT y SPEC_CAMPOS deben coincidir EXACTAMENTE con los
+    nombres que Maximo devuelve en el JSON. Si difieren, el transformer no los
+    encuentra y quedan vacios.
+
+COMO AGREGAR UN CAMPO NUEVO:
+    1. Agregarlo a la lista correspondiente (CAMPOS_OT o SPEC_CAMPOS)
+    2. Si es fecha, agregarlo a CAMPOS_FECHA
+    3. Si es numerico pero queremos tratarlo como str, agregarlo a CAMPOS_STR_FORZADO
+    4. Definir su ancho en ANCHOS_COLUMNAS
+    5. (Opcional) Si necesita logica especial de mapeo, ajustar el transformer
 """
 
 # ══════════════════════════════════════════════════════════════

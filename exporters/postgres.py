@@ -12,7 +12,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 import logging
 
-from config import PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE
+from core.config import PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE
 from domain.campos import CAMPOS_OT, SPEC_CAMPOS
 from exporters.base import Exporter
 

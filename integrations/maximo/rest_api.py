@@ -606,7 +606,7 @@ def adjuntar_url(wonum, url, descripcion=""):
 #     Util para pruebas rapidas. Si se pasa max_members=20, corta
 #     la paginacion al alcanzar 20 OTs en lugar de traer todas.
 
-def listar_ots(ownergroup, classstructureid, page_size=PAGE_SIZE_DEFAULT, select=None, max_members=20):
+def listar_ots(ownergroup, classstructureid, page_size=PAGE_SIZE_DEFAULT, select=None, max_members=None): # colocar max_member=20 si queremos traer solo 20 Ots y mas_member=None si queremos traer todo
     """
     Extrae TODAS las OTs que matchean los filtros, iterando todas las paginas.
     Usada por tabla_maestra_4213.py y otros ETL masivos.
@@ -629,9 +629,9 @@ def listar_ots(ownergroup, classstructureid, page_size=PAGE_SIZE_DEFAULT, select
     if select is None:
         select = (
             "wonum,href,cinum,worktype,classstructureid,status,"
-            "description,location,nom_ubicacion,reportdate"
+            "description,location,nom_ubicacion,reportdate,"
+            "changedate,actfinish"
         )
-
     all_members = []
     pagina = 1
 

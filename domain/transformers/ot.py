@@ -59,11 +59,19 @@ def construir_registro(member, detalle, ci_description="", cant_worklogs=0):
         if c not in ("cinum", "ci_description", "cant_worklogs")
     ]
     for campo in campos_directos:
-        valor = detalle.get(campo) or ""
+        valor_raw = detalle.get(campo)
+
         if campo in CAMPOS_FECHA:
-            valor = (valor or "")[:19]
+            # Fechas: None si vacio o no existe, sino truncar a 19 chars
+            if not valor_raw:
+                valor = None
+            else:
+                valor = valor_raw[:19]
         elif campo in CAMPOS_STR_FORZADO:
-            valor = str(valor or "")
+            valor = str(valor_raw or "")
+        else:
+            valor = valor_raw or ""
+
         registro[campo] = valor
 
     # CI enriquecido

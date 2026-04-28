@@ -1,16 +1,3 @@
-"""
-worklog_transformer.py
-----------------------
-Logica pura de transformacion para worklogs.
-Convierte worklogs crudos de Maximo (clave 'worklog' del detalle)
-a registros planos listos para exportar.
-
-Sin dependencias de red, BD ni de formato de salida.
-"""
-
-from domain.campos import WORKLOG_CAMPOS, WORKLOG_CAMPOS_FECHA
-
-
 def construir_registros_worklog(wonum, worklogs_crudos):
     """
     Convierte la lista de worklogs de una OT a registros planos.
@@ -21,6 +8,11 @@ def construir_registros_worklog(wonum, worklogs_crudos):
 
     Retorna:
         list[dict] con exactamente WORKLOG_CAMPOS como claves cada uno.
+
+    Notas:
+        - Las fechas vacias se devuelven como None (no como string vacio),
+          para evitar errores en BDs que tipan TIMESTAMP estrictamente.
+        - clientviewable se devuelve como bool nativo de Python.
     """
     registros = []
 
@@ -28,16 +20,26 @@ def construir_registros_worklog(wonum, worklogs_crudos):
         registro = {
             "worklog_id":          str(wl.get("worklogid") or ""),
             "wonum":               wl.get("recordkey") or wonum,
-            "createdate":          (wl.get("createdate") or "")[:19],
+            "createdate":          _fecha_o_none(wl.get("createdate")),
             "createby":            wl.get("createby") or "",
-            "modifydate":          (wl.get("modifydate") or "")[:19],
+            "modifydate":          _fecha_o_none(wl.get("modifydate")),
             "modifyby":            wl.get("modifyby") or "",
             "logtype":             wl.get("logtype") or "",
             "logtype_description": wl.get("logtype_description") or "",
             "description":         wl.get("description") or "",
             "description_long":    wl.get("description_longdescription") or "",
-            "clientviewable":      "1" if wl.get("clientviewable") else "0",
+            "clientviewable":      bool(wl.get("clientviewable")),
         }
         registros.append(registro)
 
     return registros
+
+
+def _fecha_o_none(valor):
+    """
+    Convierte una fecha de Maximo a string truncado a 19 chars,
+    o None si esta vacia o ausente.
+    """
+    if not valor:
+        return None
+    return valor[:19]

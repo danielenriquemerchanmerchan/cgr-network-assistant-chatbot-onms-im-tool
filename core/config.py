@@ -64,7 +64,7 @@ DB_PASSWORD = os.getenv("DB_PASSWORD")
 
 
 # ══════════════════════════════════════════════════════════════
-# POSTGRESQL (opcional)
+# POSTGRESQL (BD del dashboard ONMS, schema 'onms')
 # ══════════════════════════════════════════════════════════════
 
 PG_HOST     = os.getenv("PG_HOST", "localhost")

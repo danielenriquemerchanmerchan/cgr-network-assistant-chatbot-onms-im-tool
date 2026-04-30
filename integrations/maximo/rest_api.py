@@ -606,7 +606,18 @@ def adjuntar_url(wonum, url, descripcion=""):
 #     Util para pruebas rapidas. Si se pasa max_members=20, corta
 #     la paginacion al alcanzar 20 OTs en lugar de traer todas.
 
-def listar_ots(ownergroup, classstructureid, page_size=PAGE_SIZE_DEFAULT, select=None, max_members=None): # colocar max_member=20 si queremos traer solo 20 Ots y mas_member=None si queremos traer todo
+def listar_ots(
+    ownergroup,
+    classstructureid,
+    page_size=PAGE_SIZE_DEFAULT,
+    select=None,
+    max_members=None,
+    fecha_desde=None,
+    fecha_hasta=None,
+    changedate_desde=None,
+    worktype=None,
+    status_in=None,
+):
     """
     Extrae TODAS las OTs que matchean los filtros, iterando todas las paginas.
     Usada por tabla_maestra_4213.py y otros ETL masivos.
@@ -622,6 +633,14 @@ def listar_ots(ownergroup, classstructureid, page_size=PAGE_SIZE_DEFAULT, select
         max_members      (int, opcional): limite de OTs a retornar. Si se alcanza,
                          detiene la paginacion. Util para pruebas rapidas.
                          None (default) = traer todas las paginas.
+        fecha_desde      (datetime, opcional): filtra reportdate >= fecha_desde.
+                         Util para historico de un periodo o para operativo (frescas).
+        fecha_hasta      (datetime, opcional): filtra reportdate < fecha_hasta.
+                         Combina con fecha_desde para obtener un rango cerrado.
+        changedate_desde (datetime, opcional): filtra changedate >= fecha.
+                         Util para detectar OTs con movimiento reciente.
+        worktype         (str, opcional): filtra por worktype. Ej: 'MC', 'MP'.
+        status_in        (list, opcional): filtra por status. Ej: ['INPRG','COMP'].
 
     Retorna:
         list[dict] con los members de todas las paginas, o [] si hay error.
@@ -638,10 +657,31 @@ def listar_ots(ownergroup, classstructureid, page_size=PAGE_SIZE_DEFAULT, select
     while True:
         r = None
         try:
+            # Construir el oslc.where dinamicamente segun los filtros recibidos
+            where_partes = [
+                f'ownergroup="{ownergroup}"',
+                f'classstructureid="{classstructureid}"',
+            ]
+            if worktype:
+                where_partes.append(f'worktype="{worktype}"')
+            if status_in:
+                valores = ",".join(f'"{s}"' for s in status_in)
+                where_partes.append(f'status in [{valores}]')
+            if fecha_desde:
+                fecha_iso = fecha_desde.strftime("%Y-%m-%dT%H:%M:%S-05:00")
+                where_partes.append(f'reportdate>="{fecha_iso}"')
+            if fecha_hasta:
+                fecha_iso = fecha_hasta.strftime("%Y-%m-%dT%H:%M:%S-05:00")
+                where_partes.append(f'reportdate<"{fecha_iso}"')
+            if changedate_desde:
+                fecha_iso = changedate_desde.strftime("%Y-%m-%dT%H:%M:%S-05:00")
+                where_partes.append(f'changedate>="{fecha_iso}"')
+
+            where_str = " and ".join(where_partes)
+
             url = (
                 f"{URL_BASE}?lean=1"
-                f'&oslc.where=ownergroup="{ownergroup}" '
-                f'and classstructureid="{classstructureid}"'
+                f"&oslc.where={where_str}"
                 f"&oslc.select={select}"
                 f"&oslc.orderBy=-reportdate"
                 f"&oslc.pageSize={page_size}"

@@ -25,7 +25,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 
 from core.config import PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE
-
+from core.config import UMBRAL_FRESCA, UMBRAL_TIBIA, UMBRAL_ANTIGUA
 
 # ════════════════════════════════════════════════════════════════════
 # CONFIGURACION
@@ -125,16 +125,25 @@ def obtener_wonums_activos(conn):
     
 def obtener_wonums_operativas(conn):
     """
-    Retorna un set con los wonums que actualmente estan activa=true
-    Y clasificacion_operativa='OPERATIVA' en la BD.
+    Retorna un set con los wonums que estan activa=true y dentro de la
+    ventana operativa (creadas o cerradas en los ultimos DIAS_VENTANA_OPERATIVA dias).
 
-    Usado por el ETL operativo para detectar salidas dentro del rango
-    operativo, sin tocar las zombies.
+    Usado por el ETL operativo para detectar salidas: las OTs que estan en
+    BD dentro de la ventana pero ya no aparecen en Maximo se marcan como
+    salidas (cambio de ownergroup, status pasado a CAN, etc.).
+
+    NO incluye OTs MUY_ANTIGUA (ya fuera de la ventana). Esas siguen en BD
+    pero no se evaluan para detectar salidas en el operativo.
+
+    Criterios de inclusion segun status:
+        INPRG: reportdate >= hace DIAS_VENTANA_OPERATIVA dias
+        COMP:  changedate >= hace DIAS_VENTANA_OPERATIVA dias
+        CLOSE: actfinish  >= hace DIAS_VENTANA_OPERATIVA dias
     """
     sql = f"""
         SELECT wonum FROM {SCHEMA}.work_orders
         WHERE activa = true
-          AND clasificacion_operativa = 'OPERATIVA'
+          AND clasificacion_operativa IN ('FRESCA', 'TIBIA', 'ANTIGUA', 'SOLUCIONADO', 'DOCUMENTADO')
     """
     with conn.cursor() as cur:
         cur.execute(sql)
@@ -143,24 +152,46 @@ def obtener_wonums_operativas(conn):
 
 def reclasificar_envejecidas(conn):
     """
-    Reclasifica como ZOMBIE las OTs que eran OPERATIVAS pero ya cumplieron
-    7 dias desde su creacion. Esto se hace en BD sin necesidad de consultar
-    Maximo.
+    Recalcula clasificacion_operativa para TODAS las OTs activas segun
+    su edad actual. Se ejecuta al inicio de cada corrida del ETL para
+    mantener la BD al dia con las categorias correctas.
+
+    Reglas (umbrales en core/config.py):
+        INPRG con < UMBRAL_FRESCA dias    → FRESCA
+        INPRG con < UMBRAL_TIBIA dias     → TIBIA
+        INPRG con < UMBRAL_ANTIGUA dias   → ANTIGUA
+        INPRG con >= UMBRAL_ANTIGUA dias  → MUY_ANTIGUA
+        COMP                               → SOLUCIONADO
+        CLOSE                              → DOCUMENTADO
+
+    Solo actualiza filas donde la categoria cambio realmente, para
+    evitar UPDATEs innecesarios.
 
     Retorna: cantidad de OTs reclasificadas.
     """
     sql = f"""
         UPDATE {SCHEMA}.work_orders
-        SET clasificacion_operativa = CASE
-                WHEN status = 'INPRG' THEN 'INPRG_ZOMBIE'
-                WHEN status = 'COMP'  THEN 'COMP_ZOMBIE'
-                ELSE 'OPERATIVA'
-            END,
+        SET clasificacion_operativa = calc.nueva_categoria,
             ultima_actualizacion = NOW()
-        WHERE activa = true
-          AND clasificacion_operativa = 'OPERATIVA'
-          AND status IN ('INPRG', 'COMP')
-          AND creation_date < NOW() - INTERVAL '7 days'
+        FROM (
+            SELECT wonum,
+                CASE
+                    WHEN status = 'COMP'  THEN 'SOLUCIONADO'
+                    WHEN status = 'CLOSE' THEN 'DOCUMENTADO'
+                    WHEN status = 'INPRG' THEN
+                        CASE
+                            WHEN EXTRACT(EPOCH FROM (NOW() - creation_date)) / 86400 < {UMBRAL_FRESCA}  THEN 'FRESCA'
+                            WHEN EXTRACT(EPOCH FROM (NOW() - creation_date)) / 86400 < {UMBRAL_TIBIA}   THEN 'TIBIA'
+                            WHEN EXTRACT(EPOCH FROM (NOW() - creation_date)) / 86400 < {UMBRAL_ANTIGUA} THEN 'ANTIGUA'
+                            ELSE 'MUY_ANTIGUA'
+                        END
+                    ELSE clasificacion_operativa
+                END AS nueva_categoria
+            FROM {SCHEMA}.work_orders
+            WHERE activa = true
+        ) calc
+        WHERE {SCHEMA}.work_orders.wonum = calc.wonum
+          AND {SCHEMA}.work_orders.clasificacion_operativa IS DISTINCT FROM calc.nueva_categoria
     """
     with conn.cursor() as cur:
         cur.execute(sql)

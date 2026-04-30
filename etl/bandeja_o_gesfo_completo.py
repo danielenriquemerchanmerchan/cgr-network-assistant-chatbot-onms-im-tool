@@ -36,6 +36,7 @@ import time
 import logging
 from datetime import datetime, timedelta
 
+from core.config import UMBRAL_FRESCA, UMBRAL_TIBIA, UMBRAL_ANTIGUA, DIAS_VENTANA_OPERATIVA
 from core.logging_setup import logger  # inicializa logging
 from integrations.maximo.rest_api import (
     listar_ots,
@@ -66,7 +67,6 @@ CLASSSTRUCTUREID = "4213"
 WORKTYPES_VALIDOS = {"MC"}
 STATUSES_VALIDOS = {"INPRG", "COMP", "CLOSE"}
 
-DIAS_FRESCURA_COMP_CLOSE = 7    # COMP/CLOSE solo si entraron al estado en ultimos N dias
 DIAS_OPERATIVA = 7              # Threshold para clasificar OPERATIVA vs ZOMBIE
 DIAS_RETENCION_SALIDAS = 5      # Eliminar OTs que llevan mas de N dias inactivas
 
@@ -89,11 +89,11 @@ def es_relevante(ot, ahora):
     """
     Determina si una OT pasa el filtro para entrar a la bandeja.
 
-    Reglas:
+    Reglas (umbral en core/config.py: DIAS_VENTANA_OPERATIVA):
         - worktype debe ser MC
-        - status INPRG: siempre
-        - status COMP: solo si changedate < 7 dias
-        - status CLOSE: solo si actfinish < 7 dias
+        - status INPRG: siempre (sin importar antiguedad)
+        - status COMP:  solo si changedate >= hace DIAS_VENTANA_OPERATIVA dias
+        - status CLOSE: solo si actfinish  >= hace DIAS_VENTANA_OPERATIVA dias
     """
     # Filtro 1: worktype
     if ot.get("worktype") not in WORKTYPES_VALIDOS:
@@ -108,7 +108,7 @@ def es_relevante(ot, ahora):
     if status == "INPRG":
         return True
 
-    umbral = ahora - timedelta(days=DIAS_FRESCURA_COMP_CLOSE)
+    umbral = ahora - timedelta(days=DIAS_VENTANA_OPERATIVA)
 
     if status == "COMP":
         changedate = parsear_fecha(ot.get("changedate"))
@@ -123,31 +123,48 @@ def es_relevante(ot, ahora):
 
 def clasificar_ot(ot, ahora):
     """
-    Determina la clasificacion operativa de una OT.
+    Determina la clasificacion operativa de una OT segun status + antiguedad.
+
+    Reglas (umbrales en core/config.py):
+        INPRG:
+            < UMBRAL_FRESCA dias        → FRESCA
+            < UMBRAL_TIBIA dias         → TIBIA
+            < UMBRAL_ANTIGUA dias       → ANTIGUA
+            >= UMBRAL_ANTIGUA dias      → MUY_ANTIGUA
+        COMP   → SOLUCIONADO
+        CLOSE  → DOCUMENTADO
+
+    La clasificacion es DESCRIPTIVA. No controla logica de salidas ni
+    visibilidad. El frontend decide como visualizar segun la categoria.
 
     Returns:
-        'OPERATIVA' | 'INPRG_ZOMBIE' | 'COMP_ZOMBIE'
+        'FRESCA' | 'TIBIA' | 'ANTIGUA' | 'MUY_ANTIGUA' | 'SOLUCIONADO' | 'DOCUMENTADO'
     """
     status = ot.get("status")
-    creation = parsear_fecha(ot.get("reportdate"))
 
-    if creation is None:
-        return "OPERATIVA"
-
-    dias_creada = (ahora - creation).days
-
-    if dias_creada < DIAS_OPERATIVA:
-        return "OPERATIVA"
-
-    # Mas de 7 dias de creada
-    if status == "INPRG":
-        return "INPRG_ZOMBIE"
     if status == "COMP":
-        return "COMP_ZOMBIE"
+        return "SOLUCIONADO"
 
-    # CLOSE siempre es OPERATIVA si paso el filtro de relevancia
-    return "OPERATIVA"
+    if status == "CLOSE":
+        return "DOCUMENTADO"
 
+    if status == "INPRG":
+        creation = parsear_fecha(ot.get("reportdate"))
+        if creation is None:
+            return "FRESCA"
+
+        dias_creada = (ahora - creation).total_seconds() / 86400
+
+        if dias_creada < UMBRAL_FRESCA:
+            return "FRESCA"
+        if dias_creada < UMBRAL_TIBIA:
+            return "TIBIA"
+        if dias_creada < UMBRAL_ANTIGUA:
+            return "ANTIGUA"
+        return "MUY_ANTIGUA"
+
+    # Status desconocido (no deberia llegar aqui por los filtros previos)
+    return "FRESCA"
 
 def calcular_etom_phase(status):
     """Mapea status de Maximo a fase eTOM (TMForum)."""

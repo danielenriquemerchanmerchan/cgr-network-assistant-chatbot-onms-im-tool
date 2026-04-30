@@ -109,7 +109,20 @@ PTM_PASSWORD = os.getenv("PTM_PASSWORD")
 ROSE_USER     = os.getenv("ROSE_USER")
 ROSE_PASSWORD = os.getenv("ROSE_PASSWORD")
 
+# ════════════════════════════════════════════════════════════════════
+# UMBRALES DE CLASIFICACION DE OTs (en dias)
+# ════════════════════════════════════════════════════════════════════
+# Modificar aqui para cambiar las reglas de clasificacion en TODO el proyecto.
+# Estos umbrales aplican solo a OTs en estado INPRG.
+# COMP siempre es SOLUCIONADO. CLOSE siempre es DOCUMENTADO.
 
+UMBRAL_FRESCA  = 1   # < 1 dia       → FRESCA
+UMBRAL_TIBIA   = 7   # 1 a 7 dias    → TIBIA
+UMBRAL_ANTIGUA = 14  # 7 a 14 dias   → ANTIGUA
+                     # > 14 dias     → MUY_ANTIGUA
+
+# Ventana operativa: hasta cuantos dias atras trae el ETL operativo
+DIAS_VENTANA_OPERATIVA = 14
 
 # ══════════════════════════════════════════════════════════════
 # CONSTANTES HISTORICAS — revisar si todavia aplican

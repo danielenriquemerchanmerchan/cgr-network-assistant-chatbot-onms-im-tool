@@ -1,34 +1,42 @@
 """
-bandeja_o_gesfo.py
-------------------
-ETL de sincronizacion de la bandeja activa de O_GESFO desde Maximo a Postgres.
+bandeja_o_gesfo_completo.py
+---------------------------
+ETL COMPLETO de sincronizacion de la bandeja activa de O_GESFO desde Maximo
+a Postgres. Trae TODAS las OTs vigentes (sin filtro de fecha en Maximo).
 
 PROPOSITO:
-    Mantener la tabla onms.work_orders sincronizada con Maximo cada 5 minutos.
+    Mantener la tabla onms.work_orders sincronizada con Maximo. Es el ETL
+    "de fondo" que se ejecuta 1 vez al dia (programado en scheduler.py a las
+    3:00am) para garantizar consistencia con TODAS las OTs, incluyendo las
+    MUY_ANTIGUA que el operativo no trae.
+
     Cada ejecucion:
-        1. Trae OTs vigentes de Maximo
+        1. Trae todas las OTs INPRG + COMP/CLOSE recientes de Maximo
         2. UPSERT en work_orders (solo cambios reales)
         3. Reemplaza worklogs de cada OT
         4. Marca como salidas las OTs que ya no aparecen
-        5. Limpia OTs viejas (mas de 5 dias inactivas)
+        5. Limpia OTs inactivas con mas de DIAS_RETENCION_SALIDAS dias
 
-FILTRO DE OTs RELEVANTES:
+FILTRO DE OTs RELEVANTES (en core/config.py: DIAS_VENTANA_OPERATIVA):
     worktype = 'MC' AND classstructureid = '4213' AND ownergroup = 'O_GESFO'
     Y ademas:
-        status = 'INPRG'                                    (TODAS)
-        OR (status = 'COMP'  AND changedate >= NOW() - 7d)  (recientes)
-        OR (status = 'CLOSE' AND actfinish  >= NOW() - 7d)  (recientes)
+        status = 'INPRG'                                                    (TODAS)
+        OR (status = 'COMP'  AND changedate >= hace DIAS_VENTANA_OPERATIVA)
+        OR (status = 'CLOSE' AND actfinish  >= hace DIAS_VENTANA_OPERATIVA)
 
-CLASIFICACION OPERATIVA:
-    OPERATIVA       -> creacion < 7 dias O cualquier CLOSE recien cerrada
-    INPRG_ZOMBIE    -> INPRG con creacion > 7 dias (sin actividad reciente)
-    COMP_ZOMBIE     -> COMP con creacion > 7 dias
+CLASIFICACION OPERATIVA (umbrales en core/config.py):
+    INPRG con < UMBRAL_FRESCA dias    → FRESCA
+    INPRG con < UMBRAL_TIBIA dias     → TIBIA
+    INPRG con < UMBRAL_ANTIGUA dias   → ANTIGUA
+    INPRG con >= UMBRAL_ANTIGUA dias  → MUY_ANTIGUA
+    COMP                               → SOLUCIONADO
+    CLOSE                              → DOCUMENTADO
 
 EJECUCION:
-    py -m etl.bandeja_o_gesfo
+    py -m etl.bandeja_o_gesfo_completo
 
-PROXIMA FASE:
-    Programar con Task Scheduler de Windows para ejecucion cada 5 min.
+    O via scheduler:
+    py -m etl.scheduler   (lo lanza automaticamente a las 3:00am)
 """
 
 import sys
@@ -36,7 +44,10 @@ import time
 import logging
 from datetime import datetime, timedelta
 
-from core.config import UMBRAL_FRESCA, UMBRAL_TIBIA, UMBRAL_ANTIGUA, DIAS_VENTANA_OPERATIVA
+from core.config import (
+    UMBRAL_FRESCA, UMBRAL_TIBIA, UMBRAL_ANTIGUA,
+    DIAS_VENTANA_OPERATIVA, DIAS_RETENCION_SALIDAS,
+)
 from core.logging_setup import logger  # inicializa logging
 from integrations.maximo.rest_api import (
     listar_ots,
@@ -66,9 +77,6 @@ OWNERGROUP = "O_GESFO"
 CLASSSTRUCTUREID = "4213"
 WORKTYPES_VALIDOS = {"MC"}
 STATUSES_VALIDOS = {"INPRG", "COMP", "CLOSE"}
-
-DIAS_OPERATIVA = 7              # Threshold para clasificar OPERATIVA vs ZOMBIE
-DIAS_RETENCION_SALIDAS = 5      # Eliminar OTs que llevan mas de N dias inactivas
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -296,7 +304,7 @@ def mapear_a_postgres(registro):
         if k in mapeo:
             nuevo[mapeo[k]] = v
         # Si esta en mayusculas (probable spec), convertir a minusculas
-        elif k.isupper() or "_" in k and any(c.isupper() for c in k):
+        elif k.isupper() or ("_" in k and any(c.isupper() for c in k)):
             nuevo[k.lower()] = v
         # Sino, dejar tal cual
         else:

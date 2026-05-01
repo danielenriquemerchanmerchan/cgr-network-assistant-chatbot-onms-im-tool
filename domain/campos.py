@@ -148,3 +148,35 @@ ANCHOS_WORKLOG = {
     "description_long":     80,
     "clientviewable":       12,
 }
+
+# ══════════════════════════════════════════════════════════════
+# CLASIFICACION OPERATIVA (referencia)
+# ══════════════════════════════════════════════════════════════
+# La columna `clasificacion_operativa` en onms.work_orders puede tener
+# 6 valores. Los umbrales de las categorias INPRG estan en core/config.py.
+#
+# La logica de clasificacion vive en:
+#   - etl/bandeja_o_gesfo_completo.py:clasificar_ot()  (al hacer upsert)
+#   - integrations/postgres/client.py:reclasificar_envejecidas()
+#       (recalcula al inicio de cada corrida del ETL)
+#
+# Tabla de equivalencias:
+#
+#   STATUS  EDAD (dias)        CLASIFICACION
+#   ──────────────────────────────────────────
+#   INPRG   0 a UMBRAL_FRESCA  → FRESCA
+#   INPRG   a UMBRAL_TIBIA     → TIBIA
+#   INPRG   a UMBRAL_ANTIGUA   → ANTIGUA
+#   INPRG   > UMBRAL_ANTIGUA   → MUY_ANTIGUA
+#   COMP    cualquier          → SOLUCIONADO
+#   CLOSE   cualquier          → DOCUMENTADO
+#
+# La clasificacion es DESCRIPTIVA. No controla logica de negocio
+# (filtros, salidas, visibilidad). El frontend decide como visualizar
+# las OTs segun esta categoria.
+
+CLASIFICACIONES_OPERATIVAS = {
+    "INPRG": ["FRESCA", "TIBIA", "ANTIGUA", "MUY_ANTIGUA"],
+    "COMP":  ["SOLUCIONADO"],
+    "CLOSE": ["DOCUMENTADO"],
+}

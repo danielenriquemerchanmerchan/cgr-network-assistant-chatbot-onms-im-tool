@@ -173,7 +173,7 @@ def imprimir_paso_b(resultado, status):
     print(f"  Con actividad reciente (worklog < 7 dias): "
           f"{len(resultado['con_actividad_reciente']):>5}  <- legitimas viejas")
     print(f"  Sin actividad reciente:                    "
-          f"{len(resultado['sin_actividad_reciente']):>5}  <- ZOMBIES probables")
+          f"{len(resultado['sin_actividad_reciente']):>5}  <- MUY_ANTIGUA probables")
     print(f"  Sin ningun worklog:                        "
           f"{len(resultado['sin_worklogs']):>5}  <- huerfanas sin avances")
 

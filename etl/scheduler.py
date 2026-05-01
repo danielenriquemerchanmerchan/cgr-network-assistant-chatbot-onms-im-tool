@@ -35,23 +35,17 @@ from etl.bandeja_o_gesfo_completo import sincronizar_bandeja
 # ════════════════════════════════════════════════════════════════════
 
 def job_operativa():
-    """Wrapper del ETL operativo con manejo de excepciones."""
-    try:
-        logging.info(">>> [Scheduler] Lanzando ETL OPERATIVO")
-        sincronizar_bandeja_operativa()
-        logging.info(">>> [Scheduler] ETL OPERATIVO finalizado")
-    except Exception as e:
-        logging.exception(f">>> [Scheduler] ERROR en ETL OPERATIVO: {e}")
+    """Wrapper del ETL operativo. Errores los maneja APScheduler."""
+    logging.info(">>> [Scheduler] Lanzando ETL OPERATIVO")
+    sincronizar_bandeja_operativa()
+    logging.info(">>> [Scheduler] ETL OPERATIVO finalizado")
 
 
 def job_completo():
-    """Wrapper del ETL completo con manejo de excepciones."""
-    try:
-        logging.info(">>> [Scheduler] Lanzando ETL COMPLETO")
-        sincronizar_bandeja()
-        logging.info(">>> [Scheduler] ETL COMPLETO finalizado")
-    except Exception as e:
-        logging.exception(f">>> [Scheduler] ERROR en ETL COMPLETO: {e}")
+    """Wrapper del ETL completo. Errores los maneja APScheduler."""
+    logging.info(">>> [Scheduler] Lanzando ETL COMPLETO")
+    sincronizar_bandeja()
+    logging.info(">>> [Scheduler] ETL COMPLETO finalizado")
 
 
 # ════════════════════════════════════════════════════════════════════

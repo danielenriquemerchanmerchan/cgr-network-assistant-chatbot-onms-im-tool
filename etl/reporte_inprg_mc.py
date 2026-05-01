@@ -5,13 +5,14 @@ Genera un reporte Excel con las OTs MC en estado INPRG de O_GESFO.
 
 PROPOSITO:
     Listar las OTs que estan abiertas en INPRG para revision administrativa.
-    Las OTs muy antiguas (zombies) no deberian estar en este estado y deben
-    ser cerradas formalmente.
+    Las OTs MUY_ANTIGUA (mas de DIAS_VENTANA_OPERATIVA dias en INPRG) no
+    deberian estar en este estado y deben ser cerradas formalmente.
 
 ORIGEN DE DATOS:
     Postgres (schema onms). Los datos provienen del ultimo ETL.
-    Si necesitas datos al minuto, ejecuta primero bandeja_o_gesfo_operativa
-    para refrescar las OPERATIVAS, o el bandeja_o_gesfo_completo para todo.
+    Si necesitas datos al minuto, ejecuta primero el ETL operativo
+    para refrescar las OTs dentro de la ventana operativa, o el ETL
+    completo para todo (incluyendo MUY_ANTIGUA).
 
 ESTRUCTURA DEL EXCEL:
     Hoja 1 (OTs INPRG):  Lista detallada ordenada por antiguedad descendente

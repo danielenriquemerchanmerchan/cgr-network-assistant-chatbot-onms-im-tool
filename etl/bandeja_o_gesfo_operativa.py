@@ -1,25 +1,32 @@
 """
 bandeja_o_gesfo_operativa.py
 ----------------------------
-ETL RAPIDO de bandeja operativa: sincroniza solo las OTs OPERATIVAS de O_GESFO.
+ETL RAPIDO de bandeja operativa: sincroniza las OTs dentro de la ventana
+operativa (ultimos DIAS_VENTANA_OPERATIVA dias) desde Maximo a Postgres.
 
 DIFERENCIA CON bandeja_o_gesfo_completo.py:
     - Filtra desde Maximo (server-side): solo MC + recientes + INPRG/COMP/CLOSE
-    - Volumen tipico: ~150 OTs (con ventana de 14 dias)
-    - Tiempo: ~1-2 minutos (vs ~28 min del completo)
-    - Frecuencia recomendada: cada 5-10 minutos
-    - NO toca las OTs zombies en BD (no se entera si cambiaron)
+    - Volumen tipico: ~150-200 OTs (con ventana de 14 dias)
+    - Tiempo: ~2-3 minutos (vs ~28 min del completo)
+    - Frecuencia recomendada: cada 10 minutos (programado en scheduler.py)
+    - NO toca las OTs MUY_ANTIGUA en BD (las maneja el completo a las 3am)
 
-VENTANA OPERATIVA: 14 dias
+VENTANA OPERATIVA (en core/config.py: DIAS_VENTANA_OPERATIVA = 14):
     Esto cubre:
-    - INPRG creadas en ultimos 14 dias (operativas frescas + demoradas)
-    - COMP/CLOSE cuyo cierre cae en ultimos 14 dias (resueltas recientes)
-    Las "demoradas" (INPRG con >7 dias sin cerrar) siguen visibles para
-    no caer en el olvido. Eso se calcula en la vista, no aqui.
+    - INPRG creadas en ultimos 14 dias (FRESCA, TIBIA, ANTIGUA)
+    - COMP recientes (SOLUCIONADO)
+    - CLOSE recientes (DOCUMENTADO)
+    
+    Las INPRG que envejecen mas de 14 dias pasan a MUY_ANTIGUA y siguen en BD,
+    pero el operativo no las trae mas. El frontend filtra segun necesite.
 
-ZOMBIES:
-    Las OTs INPRG con >14 dias se sincronizan con bandeja_o_gesfo_completo.py
-    que se ejecuta una vez al dia. Este script no las trae de Maximo.
+CLASIFICACION OPERATIVA (umbrales en core/config.py):
+    INPRG con < UMBRAL_FRESCA dias    → FRESCA
+    INPRG con < UMBRAL_TIBIA dias     → TIBIA
+    INPRG con < UMBRAL_ANTIGUA dias   → ANTIGUA
+    INPRG con >= UMBRAL_ANTIGUA dias  → MUY_ANTIGUA
+    COMP                               → SOLUCIONADO
+    CLOSE                              → DOCUMENTADO
 
 FILTRO DE OTs (server-side en Maximo):
     worktype = 'MC'
@@ -30,13 +37,13 @@ FILTRO DE OTs (server-side en Maximo):
 
 FILTRO DEFENSIVO (en Python, post-fetch):
     es_operativa() valida cada OT segun el campo de fecha apropiado por status:
-        - INPRG: creation_date < 14 dias
-        - COMP:  changedate < 14 dias
-        - CLOSE: actfinish < 14 dias
+        - INPRG: creation_date < DIAS_VENTANA_OPERATIVA dias
+        - COMP:  changedate    < DIAS_VENTANA_OPERATIVA dias
+        - CLOSE: actfinish     < DIAS_VENTANA_OPERATIVA dias
 
 ORDEN DEL FLUJO (importante para evitar marcar envejecidas como salidas):
-    1. Reclasificar envejecidas PRIMERO (saca de OPERATIVA las que cumplieron 14d)
-    2. Obtener wonums OPERATIVAS de BD (despues de reclasificar)
+    1. Reclasificar PRIMERO segun edad actual (FRESCA/TIBIA/ANTIGUA/MUY_ANTIGUA)
+    2. Obtener wonums dentro de la ventana operativa de BD (despues de reclasificar)
     3. Listar OTs de Maximo (con filtros server-side)
     4. Procesar cada una
     5. Marcar como salidas las que estaban en BD pero no aparecieron
@@ -44,6 +51,9 @@ ORDEN DEL FLUJO (importante para evitar marcar envejecidas como salidas):
 
 EJECUCION:
     py -m etl.bandeja_o_gesfo_operativa
+    
+    O via scheduler:
+    py -m etl.scheduler   (lo lanza automaticamente cada 10 min)
 """
 
 import sys
@@ -142,15 +152,15 @@ def sincronizar_bandeja_operativa():
     Flujo del ETL operativo (rapido).
 
     ORDEN IMPORTANTE:
-        1. Reclasificar envejecidas PRIMERO (de OPERATIVA a INPRG_ZOMBIE)
-        2. Obtener wonums OPERATIVAS de BD (despues de reclasificar)
+        1. Recalcular clasificacion de TODAS las OTs activas (segun edad actual)
+        2. Obtener wonums dentro de la ventana operativa de BD
         3. Listar OTs de Maximo CON FILTROS SERVER-SIDE
         4. Filtro defensivo en Python (es_operativa)
         5. Procesar cada una
         6. Detectar SALIDAS REALES (las que estaban en BD y ya no aparecen)
         7. Estadisticas finales
 
-    NO HACE limpieza de zombies viejas (eso lo hace el ETL completo).
+    NO HACE limpieza de OTs antiguas (eso lo hace el ETL completo).
     """
     inicio = time.time()
     ahora = datetime.now()
@@ -161,19 +171,20 @@ def sincronizar_bandeja_operativa():
         return False
 
     try:
-        # 1. RECLASIFICAR PRIMERO las envejecidas
-        # Esto saca del cubo "OPERATIVA" a las que cumplieron DIAS_VENTANA_OPERATIVA dias
-        # antes de calcular salidas. Asi NO las marcamos como "salida" cuando
-        # en realidad solo envejecieron.
+        # 1. RECLASIFICAR PRIMERO segun edad actual
+        # Recalcula clasificacion_operativa de todas las OTs activas:
+        # FRESCA / TIBIA / ANTIGUA / MUY_ANTIGUA / SOLUCIONADO / DOCUMENTADO
+        # Esto saca del cubo "ventana operativa" a las que cumplieron
+        # DIAS_VENTANA_OPERATIVA dias antes de calcular salidas.
         cant_reclasificadas = reclasificar_envejecidas(conn)
         conn.commit()
         if cant_reclasificadas > 0:
-            logging.info(f"[Operativa] OTs reclasificadas OPERATIVA -> ZOMBIE: "
+            logging.info(f"[Operativa] OTs reclasificadas (cambio de categoria): "
                          f"{cant_reclasificadas}")
 
-        # 2. Wonums OPERATIVAS actualmente en BD (DESPUES de reclasificar)
+        # 2. Wonums dentro de la ventana operativa en BD (DESPUES de reclasificar)
         wonums_operativas_bd = obtener_wonums_operativas(conn)
-        logging.info(f"[Operativa] Wonums OPERATIVAS en BD al inicio: "
+        logging.info(f"[Operativa] Wonums en ventana operativa al inicio: "
                      f"{len(wonums_operativas_bd)}")
 
         # 3. Listar OTs de Maximo con filtros server-side
@@ -214,9 +225,10 @@ def sincronizar_bandeja_operativa():
                 logging.info(f"[Operativa] Procesadas {i}/{len(ots_operativas)} OTs...")
 
         # 6. Detectar SALIDAS REALES
-        # Las que estaban OPERATIVAS en BD pero no aparecen en Maximo.
-        # Como ya reclasificamos las envejecidas en el paso 1, las que quedan
-        # aqui son salidas legitimas (cambiaron de owner, fueron canceladas, etc.)
+        # Las que estaban dentro de la ventana operativa en BD pero no aparecen
+        # en Maximo. Como ya reclasificamos las envejecidas en el paso 1, las
+        # que quedan aqui son salidas legitimas (cambiaron de owner, fueron
+        # canceladas, etc.)
         wonums_que_salieron = wonums_operativas_bd - wonums_procesados
         cant_salidas = marcar_salidas_bandeja(wonums_que_salieron, conn)
         conn.commit()
@@ -230,7 +242,7 @@ def sincronizar_bandeja_operativa():
         logging.info("RESUMEN DE LA EJECUCION OPERATIVA")
         logging.info("="*60)
         logging.info(f"  Duracion total:                {duracion:.1f}s")
-        logging.info(f"  Reclasificadas a ZOMBIE:       {cant_reclasificadas}")
+        logging.info(f"  Reclasificadas:                {cant_reclasificadas}")
         logging.info(f"  OTs Maximo (filtradas):        {len(todas_ots)}")
         logging.info(f"  OTs operativas (validadas):    {len(ots_operativas)}")
         logging.info(f"  Insertadas (nuevas):           {contadores['INSERTED']}")

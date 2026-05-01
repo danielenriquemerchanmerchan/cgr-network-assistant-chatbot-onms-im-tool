@@ -126,19 +126,23 @@ def obtener_wonums_activos(conn):
 def obtener_wonums_operativas(conn):
     """
     Retorna un set con los wonums que estan activa=true y dentro de la
-    ventana operativa (creadas o cerradas en los ultimos DIAS_VENTANA_OPERATIVA dias).
+    ventana operativa segun su clasificacion_operativa.
 
-    Usado por el ETL operativo para detectar salidas: las OTs que estan en
-    BD dentro de la ventana pero ya no aparecen en Maximo se marcan como
-    salidas (cambio de ownergroup, status pasado a CAN, etc.).
+    Usado por el ETL operativo para detectar salidas: las OTs que estan
+    en BD dentro de la ventana pero ya no aparecen en Maximo se marcan
+    como salidas (cambio de ownergroup, status pasado a CAN, etc.).
 
-    NO incluye OTs MUY_ANTIGUA (ya fuera de la ventana). Esas siguen en BD
-    pero no se evaluan para detectar salidas en el operativo.
+    Criterio de inclusion:
+        activa = true
+        AND clasificacion_operativa IN ('FRESCA', 'TIBIA', 'ANTIGUA',
+                                         'SOLUCIONADO', 'DOCUMENTADO')
 
-    Criterios de inclusion segun status:
-        INPRG: reportdate >= hace DIAS_VENTANA_OPERATIVA dias
-        COMP:  changedate >= hace DIAS_VENTANA_OPERATIVA dias
-        CLOSE: actfinish  >= hace DIAS_VENTANA_OPERATIVA dias
+    Excluye MUY_ANTIGUA (las OTs INPRG fuera de la ventana operativa).
+    Esas siguen en BD pero no se evaluan para detectar salidas en el
+    operativo. Las maneja el completo nocturno.
+
+    NOTA: la clasificacion_operativa se calcula previamente con
+    reclasificar_envejecidas(), que recalcula segun edad actual.
     """
     sql = f"""
         SELECT wonum FROM {SCHEMA}.work_orders
@@ -358,7 +362,7 @@ def limpiar_viejas_salidas(dias, conn):
     sql = f"""
         DELETE FROM {SCHEMA}.work_orders
         WHERE activa = false
-          AND salio_bandeja_at < NOW() - INTERVAL '%s days'
+          AND salio_bandeja_at < NOW() - (INTERVAL '1 day' * %s)
     """
 
     with conn.cursor() as cur:

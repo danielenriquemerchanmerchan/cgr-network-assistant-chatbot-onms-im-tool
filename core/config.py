@@ -124,6 +124,11 @@ UMBRAL_ANTIGUA = 14  # 7 a 14 dias   → ANTIGUA
 # Ventana operativa: hasta cuantos dias atras trae el ETL operativo
 DIAS_VENTANA_OPERATIVA = 14
 
+# Retencion de OTs inactivas: cuantos dias se mantienen en BD despues de
+# salir de Maximo, antes de eliminarlas fisicamente. Aplicado por el ETL
+# completo en limpiar_viejas_salidas().
+DIAS_RETENCION_SALIDAS = 5
+
 # ══════════════════════════════════════════════════════════════
 # CONSTANTES HISTORICAS — revisar si todavia aplican
 # ══════════════════════════════════════════════════════════════

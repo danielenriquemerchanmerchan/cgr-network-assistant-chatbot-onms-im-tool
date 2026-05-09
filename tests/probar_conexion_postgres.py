@@ -57,9 +57,6 @@ def main():
         count_wl = cursor.fetchone()[0]
         print(f"Filas en onms.worklogs: {count_wl}")
 
-        cursor.execute("SELECT COUNT(*) FROM onms.bot_states")
-        count_bs = cursor.fetchone()[0]
-        print(f"Filas en onms.bot_states: {count_bs}")
 
         cursor.close()
         conn.close()
@@ -74,7 +71,7 @@ def main():
         print("  - Tu maquina puede alcanzar el servidor (ping/telnet)")
     except psycopg2.errors.UndefinedTable as e:
         print(f"[ERROR] Tabla no existe: {e}")
-        print("Verifica que las tablas onms.work_orders, onms.worklogs, onms.bot_states existan")
+        print("Verifica que las tablas onms.work_orders, onms.worklogs existan")
     except Exception as e:
         print(f"[ERROR] Inesperado: {type(e).__name__}: {e}")
 

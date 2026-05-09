@@ -109,25 +109,28 @@ PTM_PASSWORD = os.getenv("PTM_PASSWORD")
 ROSE_USER     = os.getenv("ROSE_USER")
 ROSE_PASSWORD = os.getenv("ROSE_PASSWORD")
 
-# ════════════════════════════════════════════════════════════════════
-# UMBRALES DE CLASIFICACION DE OTs (en dias)
-# ════════════════════════════════════════════════════════════════════
-# Modificar aqui para cambiar las reglas de clasificacion en TODO el proyecto.
-# Estos umbrales aplican solo a OTs en estado INPRG.
-# COMP siempre es SOLUCIONADO. CLOSE siempre es DOCUMENTADO.
+# ═══════════════════════════════════════════════════════════════════
+# ETL DE BANDEJA O_GESFO
+# ═══════════════════════════════════════════════════════════════════
+# Configuracion del ETL unico que sincroniza work_orders con Maximo.
+# Logica: trae todas las OTs (cualquier status) cuyo changedate este
+# dentro de la ventana definida abajo. Las que quedan fuera de ventana
+# se eliminan fisicamente de la BD.
 
-UMBRAL_FRESCA  = 1   # < 1 dia       → FRESCA
-UMBRAL_TIBIA   = 7   # 1 a 7 dias    → TIBIA
-UMBRAL_ANTIGUA = 14  # 7 a 14 dias   → ANTIGUA
-                     # > 14 dias     → MUY_ANTIGUA
+DIAS_INPRG_RECIENTES   = 90  # Solo INPRG creadas en los ultimos N dias
+DIAS_RETENCION_CERRADAS = 14  # COMP/CLOSE/CAN se borran luego de N dias
 
-# Ventana operativa: hasta cuantos dias atras trae el ETL operativo
-DIAS_VENTANA_OPERATIVA = 14
 
-# Retencion de OTs inactivas: cuantos dias se mantienen en BD despues de
-# salir de Maximo, antes de eliminarlas fisicamente. Aplicado por el ETL
-# completo en limpiar_viejas_salidas().
-DIAS_RETENCION_SALIDAS = 5
+# ═══════════════════════════════════════════════════════════════════
+# ETL DE CONTROL DE INPRG
+# ═══════════════════════════════════════════════════════════════════
+# Umbrales para clasificacion de OTs INPRG en el reporte de control
+# (etl/control_inprg.py). Estos umbrales aplican solo al reporte de
+# consola, NO controlan visibilidad ni logica del ETL principal.
+
+UMBRAL_INPRG_RECIENTE   = 14  # < 14 dias  → recientes (lo deseable)
+UMBRAL_INPRG_VIEJA      = 60  # 14-60 dias → viejas (rango aceptable)
+                              # > 60 dias  → ultraviejas (alarma)
 
 # ══════════════════════════════════════════════════════════════
 # CONSTANTES HISTORICAS — revisar si todavia aplican

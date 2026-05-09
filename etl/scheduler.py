@@ -1,14 +1,17 @@
 """
 scheduler.py
 ------------
-Orquestador de ejecucion programada de los ETLs de O_GESFO.
+Orquestador de ejecucion programada del ETL bandeja_o_gesfo.
 
 PROGRAMACION:
-    - Operativo: cada 10 minutos (excluyendo ventana del completo)
-    - Completo:  cada dia a las 3:00 am
+    - bandeja_o_gesfo: cada 10 minutos
 
-VENTANA DE EXCLUSION:
-    El operativo NO corre entre 2:50am y 4:00am para no chocar con el completo.
+DISEÑO:
+    Bajo el nuevo modelo (mayo 2026), el ETL es uno solo. La logica
+    incremental (diff por changedate) hace que la mayoria de corridas
+    procesen pocas OTs (~20-50), tardando 1-2 minutos. La primera
+    corrida tras un truncate tarda mas (~30 min) por procesar todo
+    el universo, pero solo es esa.
 
 EJECUCION:
     py -m etl.scheduler
@@ -19,33 +22,24 @@ DETENER:
 
 import logging
 import time
-from datetime import datetime
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 
 from core.logging_setup import logger
-from etl.bandeja_o_gesfo_operativa import sincronizar_bandeja_operativa
-from etl.bandeja_o_gesfo_completo import sincronizar_bandeja
+from etl.bandeja_o_gesfo import sincronizar_bandeja
 
 
 # ════════════════════════════════════════════════════════════════════
-# WRAPPERS CON MANEJO DE EXCEPCIONES
+# WRAPPER CON MANEJO DE EXCEPCIONES
 # ════════════════════════════════════════════════════════════════════
 
-def job_operativa():
-    """Wrapper del ETL operativo. Errores los maneja APScheduler."""
-    logging.info(">>> [Scheduler] Lanzando ETL OPERATIVO")
-    sincronizar_bandeja_operativa()
-    logging.info(">>> [Scheduler] ETL OPERATIVO finalizado")
-
-
-def job_completo():
-    """Wrapper del ETL completo. Errores los maneja APScheduler."""
-    logging.info(">>> [Scheduler] Lanzando ETL COMPLETO")
+def job_bandeja():
+    """Wrapper del ETL principal. Errores los maneja APScheduler."""
+    logging.info(">>> [Scheduler] Lanzando ETL bandeja_o_gesfo")
     sincronizar_bandeja()
-    logging.info(">>> [Scheduler] ETL COMPLETO finalizado")
+    logging.info(">>> [Scheduler] ETL bandeja_o_gesfo finalizado")
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -65,49 +59,38 @@ def listener(event):
 # ════════════════════════════════════════════════════════════════════
 
 def main():
-    logging.info("="*60)
+    logging.info("=" * 60)
     logging.info("SCHEDULER ETL O_GESFO - INICIO")
-    logging.info("="*60)
+    logging.info("=" * 60)
     logging.info("Tareas programadas:")
-    logging.info("  - Operativo: cada 10 min (excepto entre 02:50am y 04:00am)")
-    logging.info("  - Completo:  cada dia a las 03:00am")
-    logging.info("="*60)
+    logging.info("  - bandeja_o_gesfo: cada 10 minutos")
+    logging.info("=" * 60)
 
     scheduler = BlockingScheduler()
     scheduler.add_listener(listener, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
 
-    # Tarea 1: Operativo cada 10 minutos, excluyendo hora 3 (3:00 a 3:59)
+    # Tarea unica: ETL incremental cada 10 minutos
     scheduler.add_job(
-        job_operativa,
-        trigger=CronTrigger(minute='*/10', hour='0-2,4-23'),
-        id='etl_operativa',
-        name='ETL Operativo (cada 10 min)',
-        max_instances=1,           # No solapa ejecuciones
+        job_bandeja,
+        trigger=CronTrigger(minute='*/10'),
+        id='etl_bandeja',
+        name='ETL bandeja_o_gesfo (cada 10 min)',
+        max_instances=1,           # No solapar ejecuciones
         coalesce=True,             # Si pierde un ciclo, no acumula
     )
 
-    # Tarea 2: Completo a las 3:00 am
-    scheduler.add_job(
-        job_completo,
-        trigger=CronTrigger(hour=3, minute=0),
-        id='etl_completo',
-        name='ETL Completo (3:00 am)',
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # Ejecucion inmediata del operativo al iniciar
-    logging.info("[Scheduler] Ejecutando operativo inmediatamente al iniciar...")
-    job_operativa()
+    # Ejecucion inmediata al iniciar (no esperar al primer cron)
+    logging.info("[Scheduler] Ejecutando bandeja_o_gesfo al iniciar...")
+    job_bandeja()
 
     # Iniciar el scheduler (bloquea el proceso hasta Ctrl+C)
     try:
         logging.info("[Scheduler] Scheduler iniciado. Presiona Ctrl+C para detener.")
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        logging.info("="*60)
+        logging.info("=" * 60)
         logging.info("[Scheduler] Detenido por el usuario")
-        logging.info("="*60)
+        logging.info("=" * 60)
 
 
 if __name__ == "__main__":

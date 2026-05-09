@@ -80,7 +80,9 @@ CAMPOS_OT = [
     "cinum", "ci_description",
     "location", "nom_ubicacion",
     "siteid", "orgid", "ownergroup", "assignedownergroup", "persongroup",
-    "reportdate", "schedstart", "actstart", "noweekmonth",
+    "reportdate", "schedstart", "actstart", "actfinish",
+    "changedate", "statusdate",
+    "noweekmonth",
     "lead", "gerencia", "nom_gerencia", "nom_grupo",
     "direccion", "impacto", "cod_pep", "reportedby",
     "app_origen", "failurecode", "phone",
@@ -88,7 +90,7 @@ CAMPOS_OT = [
 ]
 
 # Campos que Maximo devuelve como fecha ISO (se trunca a 19 chars)
-CAMPOS_FECHA = {"reportdate", "schedstart", "actstart"}
+CAMPOS_FECHA = {"reportdate", "schedstart", "actstart", "actfinish", "changedate", "statusdate"}
 
 # Campos que se castean a str aunque vengan numericos
 CAMPOS_STR_FORZADO = {"noweekmonth", "impacto", "phone", "cant_worklogs"}
@@ -105,7 +107,8 @@ ANCHOS_COLUMNAS = {
     "location": 10, "nom_ubicacion": 22,
     "siteid": 8, "orgid": 10, "ownergroup": 12,
     "assignedownergroup": 18, "persongroup": 14,
-    "reportdate": 18, "schedstart": 18, "actstart": 18, "noweekmonth": 12,
+    "reportdate": 18, "schedstart": 18, "actstart": 18, "actfinish": 18,
+    "changedate": 18, "statusdate": 18, "noweekmonth": 12,
     "lead": 18, "gerencia": 12, "nom_gerencia": 35, "nom_grupo": 28,
     "direccion": 15, "impacto": 10, "cod_pep": 20,
     "reportedby": 15, "app_origen": 12, "failurecode": 12, "phone": 10,
@@ -149,34 +152,3 @@ ANCHOS_WORKLOG = {
     "clientviewable":       12,
 }
 
-# ══════════════════════════════════════════════════════════════
-# CLASIFICACION OPERATIVA (referencia)
-# ══════════════════════════════════════════════════════════════
-# La columna `clasificacion_operativa` en onms.work_orders puede tener
-# 6 valores. Los umbrales de las categorias INPRG estan en core/config.py.
-#
-# La logica de clasificacion vive en:
-#   - etl/bandeja_o_gesfo_completo.py:clasificar_ot()  (al hacer upsert)
-#   - integrations/postgres/client.py:reclasificar_envejecidas()
-#       (recalcula al inicio de cada corrida del ETL)
-#
-# Tabla de equivalencias:
-#
-#   STATUS  EDAD (dias)        CLASIFICACION
-#   ──────────────────────────────────────────
-#   INPRG   0 a UMBRAL_FRESCA  → FRESCA
-#   INPRG   a UMBRAL_TIBIA     → TIBIA
-#   INPRG   a UMBRAL_ANTIGUA   → ANTIGUA
-#   INPRG   > UMBRAL_ANTIGUA   → MUY_ANTIGUA
-#   COMP    cualquier          → SOLUCIONADO
-#   CLOSE   cualquier          → DOCUMENTADO
-#
-# La clasificacion es DESCRIPTIVA. No controla logica de negocio
-# (filtros, salidas, visibilidad). El frontend decide como visualizar
-# las OTs segun esta categoria.
-
-CLASIFICACIONES_OPERATIVAS = {
-    "INPRG": ["FRESCA", "TIBIA", "ANTIGUA", "MUY_ANTIGUA"],
-    "COMP":  ["SOLUCIONADO"],
-    "CLOSE": ["DOCUMENTADO"],
-}

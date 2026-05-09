@@ -617,6 +617,7 @@ def listar_ots(
     changedate_desde=None,
     worktype=None,
     status_in=None,
+    statusdate_desde=None,
 ):
     """
     Extrae TODAS las OTs que matchean los filtros, iterando todas las paginas.
@@ -676,6 +677,9 @@ def listar_ots(
             if changedate_desde:
                 fecha_iso = changedate_desde.strftime("%Y-%m-%dT%H:%M:%S-05:00")
                 where_partes.append(f'changedate>="{fecha_iso}"')
+            if statusdate_desde:
+                fecha_iso = statusdate_desde.strftime("%Y-%m-%dT%H:%M:%S-05:00")
+                where_partes.append(f'statusdate>="{fecha_iso}"')
 
             where_str = " and ".join(where_partes)
 

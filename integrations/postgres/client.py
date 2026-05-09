@@ -4,8 +4,8 @@ client.py (Postgres del dashboard ONMS)
 Funciones para operar sobre el schema 'onms' en Postgres.
 
 PROPOSITO:
-    Punto unico de acceso a la BD del dashboard. Encapsula UPSERT, deteccion
-    de salidas, gestion de worklogs y limpieza de OTs viejas.
+    Punto unico de acceso a la BD del dashboard. Encapsula UPSERT,
+    gestion de worklogs y limpieza por estado.
 
 NO HACE:
     - No habla con Maximo (eso es de integrations/maximo/rest_api.py)
@@ -15,30 +15,37 @@ NO HACE:
 PATRON:
     Funciones sueltas que reciben la conexion como parametro. La conexion
     la maneja el orquestador (etl/bandeja_o_gesfo.py).
-    Cada funcion hace su trabajo y deja un estado consistente.
+
+MODELO (rediseno mayo 2026):
+    - Un solo ETL que sincroniza work_orders con Maximo.
+    - Tablero muestra: INPRG (<DIAS_INPRG_RECIENTES) + COMP/CLOSE/CAN (<DIAS_RETENCION_CERRADAS).
+    - Las OTs que ya no estan en el modelo se eliminan fisicamente (CASCADE de worklogs).
+    - 'primera_aparicion' se llena solo en INSERT (no se sobrescribe en UPDATE).
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
-from core.config import PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE
-from core.config import UMBRAL_FRESCA, UMBRAL_TIBIA, UMBRAL_ANTIGUA
+from core.config import (
+    PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE,
+)
 
-# ════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════
 # CONFIGURACION
-# ════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 
 SCHEMA = "onms"
 
-# Campos de work_orders que el ETL escribe (sin metadata)
-# Estos son los que se comparan en el UPSERT para detectar cambios
+# Campos de work_orders que el ETL escribe (sin metadata).
+# Estos son los que se comparan en el UPSERT para detectar cambios.
 CAMPOS_WORK_ORDER = [
     # Identificadores y enriquecimiento
     "cinum", "ci_description", "description",
-    # Estado y clasificacion
+    # Estado
     "status", "etom_phase", "woclass", "worktype", "classstructureid",
     # Personas
     "reported_by", "assigned_to", "owner_group", "persongroup",
@@ -47,7 +54,8 @@ CAMPOS_WORK_ORDER = [
     # Severidad
     "severity",
     # Fechas
-    "creation_date", "actual_start",
+    "creation_date", "actual_start", "actual_finish",
+    "changedate", "statusdate",
     # SPEC_CAMPOS (en minusculas, igual que en BD)
     "eecc_cuadrilla_fo", "tipo_cuadrilla_fo", "operador_fo",
     "numero_caso_fo", "coordinador_red_fo", "lider_de_zona_fo",
@@ -56,8 +64,10 @@ CAMPOS_WORK_ORDER = [
     "tipo_tramo", "tipo_operacion_fo", "dist_optica", "origen_medida",
     "tipo_causa", "observ_cierre", "coordenada_corte_long", "coordenada_corte_lat",
     "parada_reloj", "tiempo_efect",
+    # Enriquecimiento via Oracle
+    "ciudad", "departamento",
     # Metadata derivada
-    "cant_worklogs", "clasificacion_operativa",
+    "cant_worklogs",
 ]
 
 # Campos de worklogs que se insertan
@@ -71,9 +81,9 @@ CAMPOS_WORKLOG = [
 ]
 
 
-# ════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 # 1. CONEXION
-# ════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
 
 def obtener_conexion():
     """
@@ -90,7 +100,6 @@ def obtener_conexion():
             password=PG_PASSWORD,
             dbname=PG_DATABASE,
         )
-        # autocommit=False para tener control explicito de los commits
         conn.autocommit = False
         logging.info(f"[Postgres] Conexion abierta a {PG_DATABASE}@{PG_HOST}:{PG_PORT}")
         return conn
@@ -106,137 +115,46 @@ def cerrar_conexion(conn):
         logging.info("[Postgres] Conexion cerrada")
 
 
-# ════════════════════════════════════════════════════════════════════
-# 2. WORK ORDERS - LECTURA
-# ════════════════════════════════════════════════════════════════════
-
-def obtener_wonums_activos(conn):
-    """
-    Retorna un set con los wonums que actualmente estan activa=true en la BD.
-
-    Sirve para hacer el "diff" con Maximo: las OTs en BD que ya no aparecen
-    en Maximo son candidatas a marcarse como salidas.
-    """
-    sql = f"SELECT wonum FROM {SCHEMA}.work_orders WHERE activa = true"
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        return {row[0] for row in cur.fetchall()}
-    
-    
-def obtener_wonums_operativas(conn):
-    """
-    Retorna un set con los wonums que estan activa=true y dentro de la
-    ventana operativa segun su clasificacion_operativa.
-
-    Usado por el ETL operativo para detectar salidas: las OTs que estan
-    en BD dentro de la ventana pero ya no aparecen en Maximo se marcan
-    como salidas (cambio de ownergroup, status pasado a CAN, etc.).
-
-    Criterio de inclusion:
-        activa = true
-        AND clasificacion_operativa IN ('FRESCA', 'TIBIA', 'ANTIGUA',
-                                         'SOLUCIONADO', 'DOCUMENTADO')
-
-    Excluye MUY_ANTIGUA (las OTs INPRG fuera de la ventana operativa).
-    Esas siguen en BD pero no se evaluan para detectar salidas en el
-    operativo. Las maneja el completo nocturno.
-
-    NOTA: la clasificacion_operativa se calcula previamente con
-    reclasificar_envejecidas(), que recalcula segun edad actual.
-    """
-    sql = f"""
-        SELECT wonum FROM {SCHEMA}.work_orders
-        WHERE activa = true
-          AND clasificacion_operativa IN ('FRESCA', 'TIBIA', 'ANTIGUA', 'SOLUCIONADO', 'DOCUMENTADO')
-    """
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        return {row[0] for row in cur.fetchall()}
-
-
-def reclasificar_envejecidas(conn):
-    """
-    Recalcula clasificacion_operativa para TODAS las OTs activas segun
-    su edad actual. Se ejecuta al inicio de cada corrida del ETL para
-    mantener la BD al dia con las categorias correctas.
-
-    Reglas (umbrales en core/config.py):
-        INPRG con < UMBRAL_FRESCA dias    → FRESCA
-        INPRG con < UMBRAL_TIBIA dias     → TIBIA
-        INPRG con < UMBRAL_ANTIGUA dias   → ANTIGUA
-        INPRG con >= UMBRAL_ANTIGUA dias  → MUY_ANTIGUA
-        COMP                               → SOLUCIONADO
-        CLOSE                              → DOCUMENTADO
-
-    Solo actualiza filas donde la categoria cambio realmente, para
-    evitar UPDATEs innecesarios.
-
-    Retorna: cantidad de OTs reclasificadas.
-    """
-    sql = f"""
-        UPDATE {SCHEMA}.work_orders
-        SET clasificacion_operativa = calc.nueva_categoria,
-            ultima_actualizacion = NOW()
-        FROM (
-            SELECT wonum,
-                CASE
-                    WHEN status = 'COMP'  THEN 'SOLUCIONADO'
-                    WHEN status = 'CLOSE' THEN 'DOCUMENTADO'
-                    WHEN status = 'INPRG' THEN
-                        CASE
-                            WHEN EXTRACT(EPOCH FROM (NOW() - creation_date)) / 86400 < {UMBRAL_FRESCA}  THEN 'FRESCA'
-                            WHEN EXTRACT(EPOCH FROM (NOW() - creation_date)) / 86400 < {UMBRAL_TIBIA}   THEN 'TIBIA'
-                            WHEN EXTRACT(EPOCH FROM (NOW() - creation_date)) / 86400 < {UMBRAL_ANTIGUA} THEN 'ANTIGUA'
-                            ELSE 'MUY_ANTIGUA'
-                        END
-                    ELSE clasificacion_operativa
-                END AS nueva_categoria
-            FROM {SCHEMA}.work_orders
-            WHERE activa = true
-        ) calc
-        WHERE {SCHEMA}.work_orders.wonum = calc.wonum
-          AND {SCHEMA}.work_orders.clasificacion_operativa IS DISTINCT FROM calc.nueva_categoria
-    """
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        return cur.rowcount
-
-
-# ════════════════════════════════════════════════════════════════════
-# 3. WORK ORDERS - UPSERT
-# ════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# 2. WORK ORDERS - UPSERT
+# ═══════════════════════════════════════════════════════════════════
 
 def upsert_work_order(registro, conn):
     """
     Inserta o actualiza una OT en work_orders.
 
     Logica:
-        - Si la OT no existe -> INSERT
-        - Si existe y algo cambio -> UPDATE (solo cambia ultima_actualizacion)
+        - Si la OT no existe -> INSERT (incluye primera_aparicion = NOW())
+        - Si existe y algo cambio -> UPDATE (NO toca primera_aparicion)
         - Si existe y nada cambio -> nada
-        - Siempre marca activa=true y salio_bandeja_at=NULL (porque acaba de
-          aparecer en Maximo, asi que esta operacionalmente viva)
+
+    El campo primera_aparicion se llena solo al insertar y nunca se
+    sobrescribe. Asi capturamos aproximadamente cuando la OT entro en
+    O_GESFO (con margen de error de minutos por la frecuencia del ETL).
 
     Retorna:
         'INSERTED' | 'UPDATED' | 'UNCHANGED'
     """
     wonum = registro["wonum"]
+    ahora = datetime.now()
 
-    # Construir lista de columnas y placeholders dinamicamente
-    columnas = ["wonum"] + CAMPOS_WORK_ORDER + ["activa", "ultima_actualizacion", "salio_bandeja_at"]
-    valores = [wonum] + [registro.get(c) for c in CAMPOS_WORK_ORDER] + [True, datetime.now(), None]
+    # Lista de columnas a insertar (incluye primera_aparicion solo para INSERT)
+    columnas = ["wonum"] + CAMPOS_WORK_ORDER + ["primera_aparicion", "ultima_actualizacion"]
+    valores = [wonum] + [registro.get(c) for c in CAMPOS_WORK_ORDER] + [ahora, ahora]
 
     placeholders = ", ".join(["%s"] * len(columnas))
     columnas_sql = ", ".join(columnas)
 
-    # Para el UPDATE en caso de conflicto, construimos el SET dinamicamente
-    set_clauses = ", ".join([f"{c} = EXCLUDED.{c}" for c in columnas if c != "wonum"])
+    # Para el UPDATE en caso de conflicto: actualizar todos los campos
+    # EXCEPTO primera_aparicion (que solo debe llenarse al insertar).
+    columnas_update = CAMPOS_WORK_ORDER + ["ultima_actualizacion"]
+    set_clauses = ", ".join([f"{c} = EXCLUDED.{c}" for c in columnas_update])
 
-    # WHERE para detectar cambios reales: solo actualiza si algun campo difiere
-    # (excluimos ultima_actualizacion del check porque siempre cambia)
+    # WHERE para detectar cambios reales: solo actualiza si algun campo difiere.
+    # (Excluimos ultima_actualizacion del check porque siempre cambia.)
     diff_check = " OR ".join([
         f"{SCHEMA}.work_orders.{c} IS DISTINCT FROM EXCLUDED.{c}"
-        for c in CAMPOS_WORK_ORDER + ["activa", "salio_bandeja_at"]
+        for c in CAMPOS_WORK_ORDER
     ])
 
     sql = f"""
@@ -252,7 +170,7 @@ def upsert_work_order(registro, conn):
         result = cur.fetchone()
 
         if result is None:
-            # No hubo cambios (el WHERE bloqueo el UPDATE)
+            # El WHERE bloqueo el UPDATE: no hubo cambios reales
             return "UNCHANGED"
         elif result[0]:
             # xmax = 0 significa INSERT
@@ -262,54 +180,21 @@ def upsert_work_order(registro, conn):
             return "UPDATED"
 
 
-# ════════════════════════════════════════════════════════════════════
-# 4. WORK ORDERS - SALIDAS DE BANDEJA
-# ════════════════════════════════════════════════════════════════════
-
-def marcar_salidas_bandeja(wonums_que_salieron, conn):
-    """
-    Marca las OTs que ya no aparecen en Maximo como salidas:
-        activa = false
-        salio_bandeja_at = NOW() (solo si era NULL, no se sobrescribe)
-
-    Solo afecta OTs que actualmente tienen activa=true.
-
-    Retorna: cantidad de OTs marcadas.
-    """
-    if not wonums_que_salieron:
-        return 0
-
-    sql = f"""
-        UPDATE {SCHEMA}.work_orders
-        SET activa = false,
-            salio_bandeja_at = COALESCE(salio_bandeja_at, NOW()),
-            ultima_actualizacion = NOW()
-        WHERE wonum = ANY(%s)
-          AND activa = true
-    """
-
-    with conn.cursor() as cur:
-        cur.execute(sql, (list(wonums_que_salieron),))
-        cantidad = cur.rowcount
-
-    return cantidad
-
-
-# ════════════════════════════════════════════════════════════════════
-# 5. WORKLOGS - REEMPLAZO BULK
-# ════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# 3. WORKLOGS - REEMPLAZO BULK
+# ═══════════════════════════════════════════════════════════════════
 
 def reemplazar_worklogs(wonum, lista_worklogs, conn):
     """
     Reemplaza todos los worklogs de una OT.
 
     Estrategia: DELETE all + INSERT all en la misma transaccion.
-    Es mas simple que diff worklog-por-worklog, y los volumenes son chicos
-    (5-7 worklogs por OT en promedio).
+    Es mas simple que diff worklog-por-worklog, y los volumenes son
+    chicos (5-7 worklogs por OT en promedio).
 
     Argumentos:
         wonum: identificador de la OT
-        lista_worklogs: lista de dicts con campos de worklog (ver CAMPOS_WORKLOG)
+        lista_worklogs: lista de dicts con campos de worklog
         conn: conexion abierta
 
     Retorna: cantidad de worklogs insertados.
@@ -343,36 +228,61 @@ def reemplazar_worklogs(wonum, lista_worklogs, conn):
         return len(valores)
 
 
-# ════════════════════════════════════════════════════════════════════
-# 6. MANTENIMIENTO - LIMPIEZA DE VIEJAS
-# ════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════
+# 4. LIMPIEZA
+# ═══════════════════════════════════════════════════════════════════
 
-def limpiar_viejas_salidas(dias, conn):
+def limpiar_fuera_de_modelo(conn, dias_cerradas=14):
     """
-    Elimina fisicamente las OTs que llevan mas de N dias fuera de la bandeja.
+    Elimina fisicamente OTs que ya no deben estar en el tablero:
+        - status NOT IN ('INPRG')
+        - AND statusdate < hace dias_cerradas dias
 
-    Criterio:
-        activa = false
-        AND salio_bandeja_at < NOW() - INTERVAL 'N days'
+    Las INPRG no se borran aqui (esa limpieza la hace borrar_wonums()
+    cuando una INPRG sale del filtro server-side de Maximo, ej. por
+    superar DIAS_INPRG_RECIENTES).
 
-    Por CASCADE, sus worklogs y bot_states tambien se eliminan automaticamente.
+    Por CASCADE de la FK, sus worklogs tambien se eliminan.
+
+    Argumentos:
+        conn: conexion abierta
+        dias_cerradas: dias de retencion para COMP/CLOSE/CAN (default 14)
 
     Retorna: cantidad de OTs eliminadas.
     """
     sql = f"""
         DELETE FROM {SCHEMA}.work_orders
-        WHERE activa = false
-          AND salio_bandeja_at < NOW() - (INTERVAL '1 day' * %s)
+        WHERE status != 'INPRG'
+          AND statusdate < NOW() - (INTERVAL '1 day' * %s)
     """
-
     with conn.cursor() as cur:
-        cur.execute(sql, (dias,))
+        cur.execute(sql, (dias_cerradas,))
         return cur.rowcount
 
 
-# ════════════════════════════════════════════════════════════════════
-# 7. ESTADISTICAS
-# ════════════════════════════════════════════════════════════════════
+def borrar_wonums(conn, wonums_a_borrar):
+    """
+    Borra OTs especificas por wonum. Se usa cuando una OT desaparecio
+    de Maximo o ya no entra al modelo (ej. INPRG con reportdate
+    fuera de DIAS_INPRG_RECIENTES).
+
+    Argumentos:
+        conn: conexion abierta
+        wonums_a_borrar: iterable de wonums (set o lista)
+
+    Retorna: cantidad de OTs eliminadas.
+    """
+    if not wonums_a_borrar:
+        return 0
+    sql = f"DELETE FROM {SCHEMA}.work_orders WHERE wonum = ANY(%s)"
+    with conn.cursor() as cur:
+        cur.execute(sql, (list(wonums_a_borrar),))
+        return cur.rowcount
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 5. ESTADISTICAS
+# ═══════════════════════════════════════════════════════════════════
 
 def contar_filas(conn):
     """
@@ -381,15 +291,17 @@ def contar_filas(conn):
     """
     resultado = {}
     with conn.cursor() as cur:
-        for tabla in ["work_orders", "worklogs", "bot_states"]:
+        for tabla in ["work_orders", "worklogs"]:
             cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.{tabla}")
             resultado[tabla] = cur.fetchone()[0]
 
-        # Tambien contar las activas vs inactivas en work_orders
-        cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.work_orders WHERE activa = true")
-        resultado["work_orders_activas"] = cur.fetchone()[0]
-
-        cur.execute(f"SELECT COUNT(*) FROM {SCHEMA}.work_orders WHERE activa = false")
-        resultado["work_orders_inactivas"] = cur.fetchone()[0]
+        # Conteo por status (informativo)
+        cur.execute(f"""
+            SELECT status, COUNT(*)
+            FROM {SCHEMA}.work_orders
+            GROUP BY status
+            ORDER BY COUNT(*) DESC
+        """)
+        resultado["por_status"] = dict(cur.fetchall())
 
     return resultado

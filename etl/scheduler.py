@@ -28,7 +28,7 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.events import EVENT_JOB_EXECUTED, EVENT_JOB_ERROR
 
 from core.logging_setup import logger
-from etl.bandeja_o_gesfo import sincronizar_bandeja
+from etl.bandeja_o_gesfo_v1 import sincronizar_bandeja
 
 
 # ════════════════════════════════════════════════════════════════════

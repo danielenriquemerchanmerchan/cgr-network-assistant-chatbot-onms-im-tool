@@ -122,6 +122,41 @@ DIAS_RETENCION_CERRADAS = 14  # COMP/CLOSE/CAN se borran luego de N dias
 
 
 # ═══════════════════════════════════════════════════════════════════
+# ASIGNADOR AUTOMATICO DE OTs A ot_bandeja
+# ═══════════════════════════════════════════════════════════════════
+# Cada vez que el ETL termina de sincronizar work_orders, llama al
+# asignador para que las INPRG nuevas (sin presencia en ot_bandeja)
+# entren a la bandeja con un coordinador asignado segun coordinador_zona.
+
+# Filtro opcional por patron de cinum. None = no filtra (todas las INPRG
+# entran). Para limitar a un subset (ej. solo RBHFO en el futuro), poner
+# 'RBHFO%' u otro patron LIKE valido en Postgres.
+ASIGNADOR_FILTRO_CINUM_LIKE = None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# NOTIFICADOR DE OTs NUEVAS A COORDINADOR (job del bot)
+# ═══════════════════════════════════════════════════════════════════
+# Job que vive en el bot (no en el ETL). Cada N segundos lee ot_bandeja
+# y notifica via Telegram al coord asignado de cada OT que aun no se
+# ha notificado (notificacion_coordinador_enviada_at IS NULL).
+
+# Cada cuantos segundos corre el job del notificador.
+NOTIFICADOR_INTERVALO_SEG = 60
+
+# Cuantas OTs procesa por ciclo. En piloto, valor BAJO para no inundar
+# el chat del coord. Subir cuando este validado el flujo end-to-end.
+NOTIFICADOR_MAX_POR_CICLO = 5
+
+# Maximo de reintentos si Telegram falla. Despues de N intentos la OT
+# se da por "no notificable" y deja de aparecer en el SELECT del job.
+# Esto evita que una OT con problema permanente quede en loop eterno.
+NOTIFICADOR_MAX_INTENTOS = 3
+
+# Pausa (segundos) entre mensajes consecutivos para no saturar Telegram.
+NOTIFICADOR_PAUSA_ENTRE_MSG_SEG = 0.5
+
+# ═══════════════════════════════════════════════════════════════════
 # ETL DE CONTROL DE INPRG
 # ═══════════════════════════════════════════════════════════════════
 # Umbrales para clasificacion de OTs INPRG en el reporte de control

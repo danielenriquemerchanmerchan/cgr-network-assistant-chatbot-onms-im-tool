@@ -3,32 +3,70 @@ bot/handlers/bandeja.py
 -----------------------
 Handler del comando /bandeja.
 
-Muestra las OTs activas de la cuadrilla y registra la consulta.
+Detecta el contexto:
+    - Grupo (cuadrilla): muestra las OTs activas de esa cuadrilla.
+    - Chat privado (coordinador): muestra las OTs del coord agrupadas
+      en pendientes-de-asignar + asignadas-a-cuadrilla.
+    - Cualquier otro caso: mensaje informativo.
+
+El mismo comando, distinta respuesta segun quien lo escriba.
 """
 
 import logging
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
 from bot.services.cuadrillas import identificar_cuadrilla_por_chat_id
 from bot.services.bandeja import obtener_ots_activas_cuadrilla
+from bot.services.bandeja_coord import (
+    identificar_coordinador_por_telegram_user_id,
+    obtener_ots_del_coord,
+)
 from bot.services.interacciones import registrar_interaccion
+from integrations.postgres.client import obtener_conexion, cerrar_conexion
 
 logger = logging.getLogger(__name__)
 
 
+# ═══════════════════════════════════════════════════════════════════
+# ENTRY POINT — router por tipo de chat
+# ═══════════════════════════════════════════════════════════════════
+
 async def handle(update, context):
+    """
+    Punto de entrada del comando /bandeja.
+
+    Detecta el tipo de chat y delega:
+        - group/supergroup -> bandeja de cuadrilla (logica original)
+        - private          -> bandeja de coordinador (logica nueva)
+        - otro             -> mensaje informativo
+    """
+    chat_type = update.effective_chat.type
+
+    logger.info(
+        f"/bandeja recibido en chat {update.effective_chat.id} "
+        f"({chat_type})"
+    )
+
+    if chat_type in ("group", "supergroup"):
+        await _bandeja_cuadrilla(update, context)
+    elif chat_type == "private":
+        await _bandeja_coordinador(update, context)
+    else:
+        await update.message.reply_text(
+            "ℹ️ El comando /bandeja solo funciona en grupos de cuadrilla "
+            "o en chat privado con un coordinador."
+        )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# RAMA 1 — BANDEJA DE CUADRILLA (logica original, sin cambios)
+# ═══════════════════════════════════════════════════════════════════
+
+async def _bandeja_cuadrilla(update, context):
     chat_id    = update.effective_chat.id
     chat_title = update.effective_chat.title or ""
-    chat_type  = update.effective_chat.type
     user       = update.effective_user
-
-    logger.info(f"/bandeja recibido en chat {chat_id} ({chat_type})")
-
-    # /bandeja solo tiene sentido en grupos de cuadrilla
-    if chat_type not in ("group", "supergroup"):
-        await update.message.reply_text(
-            "ℹ️ El comando /bandeja solo funciona en el grupo de la cuadrilla."
-        )
-        return
 
     # Identificar la cuadrilla
     cuadrilla = identificar_cuadrilla_por_chat_id(chat_id)
@@ -89,4 +127,233 @@ async def handle(update, context):
         },
     )
 
-    logger.info(f"Bandeja consultada por {cuadrilla['cuadrilla_id']}: {len(ots)} OTs")
+    logger.info(
+        f"Bandeja consultada por {cuadrilla['cuadrilla_id']}: "
+        f"{len(ots)} OTs"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════
+# RAMA 2 — BANDEJA DE COORDINADOR (nueva)
+# ═══════════════════════════════════════════════════════════════════
+
+async def _bandeja_coordinador(update, context):
+    """
+    Muestra la bandeja del coordinador. Solo lectura (sin botones).
+
+    Formato:
+        📋 Bandeja del Coordinador {nombre}
+
+        ⚠️ N OT(s) PENDIENTE(S) DE ASIGNAR
+        ─────────────────────────────────
+        [detalle de cada una]
+
+        📌 M OT(s) asignadas a cuadrillas
+        ─────────────────────────────────
+        [detalle de cada una]
+    """
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+
+    conn = obtener_conexion()
+    if conn is None:
+        await update.message.reply_text(
+            "❌ Error de conexion a BD. Intenta de nuevo en unos minutos."
+        )
+        return
+
+    try:
+        # 1) Identificar si el user_id es un coord registrado
+        coord = identificar_coordinador_por_telegram_user_id(user.id, conn)
+        if coord is None:
+            await update.message.reply_text(
+                "ℹ️ El comando /bandeja en chat privado solo funciona "
+                "para coordinadores registrados.\n\n"
+                "Si eres una cuadrilla, escribe /bandeja en el grupo de "
+                "tu cuadrilla."
+            )
+            return
+
+        # 2) Traer las OTs activas del coord
+        datos = obtener_ots_del_coord(coord["coordinador_id"], conn)
+
+        # 3) Formatear texto + construir botones para las pendientes
+        texto = _formatear_bandeja_coord(coord, datos)
+        reply_markup = _construir_botones_pendientes(datos["pendientes_asignar"])
+
+        await update.message.reply_text(
+            texto,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+        )
+
+        # 4) Registrar la consulta
+        registrar_interaccion(
+            tipo_interaccion="mensaje_libre",
+            direccion="entrante",
+            actor_tipo="coordinador",
+            actor_id=coord["coordinador_id"],
+            telegram_chat_id=chat_id,
+            telegram_chat_title="",  # chat privado, sin titulo
+            telegram_message_id=update.message.message_id,
+            telegram_user_id=user.id,
+            telegram_username=user.username,
+            contenido_texto="/bandeja",
+            metadata={
+                "comando": "/bandeja",
+                "rol": "coordinador",
+                "ots_total":      datos["total"],
+                "pendientes":     len(datos["pendientes_asignar"]),
+                "asignadas":      len(datos["asignadas_a_cuadrilla"]),
+            },
+        )
+
+        logger.info(
+            f"Bandeja consultada por coord {coord['coordinador_id']}: "
+            f"{datos['total']} OTs "
+            f"({len(datos['pendientes_asignar'])} pendientes, "
+            f"{len(datos['asignadas_a_cuadrilla'])} asignadas)"
+        )
+
+    finally:
+        cerrar_conexion(conn)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# FORMATEO DEL TEXTO PARA LA BANDEJA DEL COORD
+# ═══════════════════════════════════════════════════════════════════
+
+def _norm(valor):
+    """Reemplaza NULL/vacio por '—'."""
+    if valor is None:
+        return "—"
+    if isinstance(valor, str) and valor.strip() == "":
+        return "—"
+    return valor
+
+
+def _fmt_fecha(dt):
+    """Formatea timestamp a 'YYYY-MM-DD HH:MM' o devuelve '—'."""
+    if dt is None:
+        return "—"
+    try:
+        return dt.strftime("%Y-%m-%d %H:%M")
+    except AttributeError:
+        return str(dt)
+
+
+def _fmt_hace_cuanto(dt):
+    """Devuelve algo legible tipo 'hace 15 min', 'hace 2h', 'hace 1d'.
+    Si dt es None, devuelve '—'."""
+    if dt is None:
+        return "—"
+    try:
+        from datetime import datetime, timezone
+        ahora = datetime.now(timezone.utc) if dt.tzinfo else datetime.now()
+        delta = ahora - dt
+        segundos = int(delta.total_seconds())
+        if segundos < 60:
+            return "hace unos segundos"
+        if segundos < 3600:
+            return f"hace {segundos // 60} min"
+        if segundos < 86400:
+            return f"hace {segundos // 3600}h"
+        return f"hace {segundos // 86400}d"
+    except Exception:
+        return _fmt_fecha(dt)
+
+
+def _formatear_ot_pendiente(ot):
+    """Bloque de detalle para una OT pendiente de asignar (sin cuadrilla aun)."""
+    return (
+        f"• `{_norm(ot['wonum'])}` · {_norm(ot['worktype'])} · "
+        f"Sev {_norm(ot['severity'])}\n"
+        f"  📍 {_norm(ot['departamento'])} · {_norm(ot['ciudad'])}\n"
+        f"  🏢 {_norm(ot['operador_fo'])}\n"
+        f"  └─ Acusada {_fmt_hace_cuanto(ot['notificacion_coordinador_recibida_at'])}, "
+        f"sin cuadrilla aun"
+    )
+
+
+def _formatear_ot_asignada(ot):
+    """Bloque de detalle para una OT ya asignada a cuadrilla."""
+    cuadrilla = _norm(ot["cuadrilla_nombre"]) if ot.get("cuadrilla_nombre") \
+        else _norm(ot["cuadrilla_id"])
+    return (
+        f"• `{_norm(ot['wonum'])}` · {_norm(ot['worktype'])} · "
+        f"Sev {_norm(ot['severity'])}\n"
+        f"  📍 {_norm(ot['departamento'])} · {_norm(ot['ciudad'])}\n"
+        f"  🏢 {_norm(ot['operador_fo'])}\n"
+        f"  🔧 {cuadrilla}\n"
+        f"  📊 Estado: _{_norm(ot['estado'])}_ / "
+        f"Fase: _{_norm(ot['fase_operativa'])}_"
+    )
+
+
+def _formatear_bandeja_coord(coord, datos):
+    """
+    Arma el texto completo de la bandeja del coordinador.
+    """
+    pendientes = datos["pendientes_asignar"]
+    asignadas  = datos["asignadas_a_cuadrilla"]
+
+    lineas = []
+    lineas.append(f"📋 *Bandeja del Coordinador {coord['nombre_completo']}*\n")
+
+    # Caso bandeja vacia
+    if datos["total"] == 0:
+        lineas.append(
+            "_Tu bandeja esta vacia. No tienes OTs activas en este momento._"
+        )
+        return "\n".join(lineas)
+
+    # Seccion 1: pendientes de asignar (resaltada)
+    if pendientes:
+        lineas.append(
+            f"⚠️ *{len(pendientes)} OT(s) PENDIENTE(S) DE ASIGNAR*"
+        )
+        lineas.append("─────────────────────────────────")
+        for ot in pendientes:
+            lineas.append(_formatear_ot_pendiente(ot))
+            lineas.append("")  # separador entre OTs
+
+    # Seccion 2: asignadas a cuadrilla
+    if asignadas:
+        lineas.append(
+            f"📌 *{len(asignadas)} OT(s) asignadas a cuadrillas*"
+        )
+        lineas.append("─────────────────────────────────")
+        for ot in asignadas:
+            lineas.append(_formatear_ot_asignada(ot))
+            lineas.append("")
+
+    return "\n".join(lineas)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# BOTONES INLINE PARA ASIGNAR LAS OTs PENDIENTES
+# ═══════════════════════════════════════════════════════════════════
+
+def _construir_botones_pendientes(ots_pendientes):
+    """
+    Construye el InlineKeyboardMarkup con un boton por cada OT pendiente
+    de asignar. Cada boton dispara el flujo de asignacion a cuadrilla.
+
+    callback_data: asig_iniciar|<asignacion_id>
+
+    Si no hay OTs pendientes, retorna None (Telegram no muestra teclado).
+    """
+    if not ots_pendientes:
+        return None
+
+    keyboard = []
+    for ot in ots_pendientes:
+        texto_boton = f"🔧 Asignar {ot['wonum']}"
+        keyboard.append([
+            InlineKeyboardButton(
+                text=texto_boton,
+                callback_data=f"asig_iniciar|{ot['asignacion_id']}",
+            )
+        ])
+
+    return InlineKeyboardMarkup(keyboard)

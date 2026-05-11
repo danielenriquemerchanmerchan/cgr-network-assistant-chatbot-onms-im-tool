@@ -53,8 +53,6 @@ from integrations.postgres.client import (
 from domain.transformers.ot import construir_registro
 from domain.transformers.worklog import construir_registros_worklog
 
-from bot.services.asignador_ot import asignar_ots_pendientes
-
 
 # ═══════════════════════════════════════════════════════════════════
 # CONFIGURACION
@@ -270,29 +268,7 @@ def sincronizar_bandeja():
 
         conn.commit()
 
-        # 6. Asignar OTs nuevas a ot_bandeja con su coordinador
-        # Toma las INPRG en work_orders que aun no estan en ot_bandeja
-        # y las inserta consultando onms.coordinador_zona. No envia
-        # Telegram (eso es trabajo del notificador del bot, que corre
-        # como job aparte cada N segundos dentro del bot).
-        # Si falla, NO se rompe el ETL: lo que ya quedo en work_orders
-        # esta persistido y el proximo ciclo reintentara la asignacion.
-        try:
-            stats_asig = asignar_ots_pendientes(conn)
-            logging.info(
-                f"[Asignador] Evaluadas={stats_asig['evaluadas']} | "
-                f"asignadas_ok={stats_asig['asignadas_ok']} | "
-                f"sin_coord={stats_asig['sin_coordinador']} | "
-                f"errores={stats_asig['errores']}"
-            )
-        except Exception as e:
-            stats_asig = None
-            logging.exception(
-                f"[Asignador] Falla inesperada del asignador (el ETL "
-                f"continua con sus stats): {e}"
-            )
-
-        # 7. Stats
+        # 6. Stats
         duracion = time.time() - inicio
         stats = contar_filas(conn)
 

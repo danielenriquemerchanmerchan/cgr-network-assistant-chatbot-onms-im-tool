@@ -2,40 +2,6 @@
 bot/services/bandeja_coord.py
 -----------------------------
 Logica de BD para la bandeja del coordinador (/bandeja en chat privado).
-
-PROPOSITO:
-    Listar las OTs del coord segun el filtro acordado: activas
-    (asignacion_activa=true) Y vivas (estado distinto a rechazada).
-    Eso incluye:
-        - OTs acusadas con [Recibida] pero aun sin cuadrilla asignada
-          (estado='pendiente_asignacion_coordinador'). PRIORIDAD ALTA.
-        - OTs ya asignadas a cuadrilla (estado='aceptada' o cualquier
-          fase posterior). EN CURSO.
-    Excluye:
-        - rechazadas_por_coordinador (asignacion_activa=false)
-        - pendiente_acuse_coordinador (aun no las acusa, no son su trabajo)
-        - terminadas/cerradas (en futuro)
-
-NO HACE:
-    - No envia mensajes (eso es del handler).
-    - No detecta quien es coord (eso es del handler).
-    - No registra interacciones.
-
-CONTRATOS PUBLICOS:
-    obtener_ots_del_coord(coordinador_id, conn) -> dict
-        Estructura del dict retornado:
-            {
-                'pendientes_asignar': [list de dicts OT],
-                'asignadas_a_cuadrilla': [list de dicts OT],
-                'total': int,
-            }
-
-        Cada dict OT contiene:
-            asignacion_id, wonum, worktype, departamento, ciudad,
-            operador_fo, severity, creation_date, description, cinum,
-            tipo_tramo, direccion, estado, fase_operativa, cuadrilla_id,
-            cuadrilla_nombre, fecha_asignacion_cuadrilla,
-            notificacion_coordinador_recibida_at
 """
 
 import logging
@@ -43,11 +9,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-# Estados que cuentan como "trabajo activo del coord"
-# - pendiente_asignacion_coordinador: acuso [Recibida] pero no ha asignado cuadrilla
-# - aceptada: asignada a cuadrilla, sin actividad iniciada
-# - en_progreso: cuadrilla esta trabajando
-# (en el futuro pueden agregarse otros estados intermedios)
 ESTADOS_ACTIVOS_COORD = (
     "pendiente_asignacion_coordinador",
     "aceptada",
@@ -55,15 +16,10 @@ ESTADOS_ACTIVOS_COORD = (
 )
 
 
-# ═══════════════════════════════════════════════════════════════════
-# IDENTIFICACION DE COORDINADOR
-# ═══════════════════════════════════════════════════════════════════
-
 def identificar_coordinador_por_telegram_user_id(telegram_user_id, conn):
     """
     Busca un coordinador activo por su telegram_user_id.
-
-    Retorna dict con campos: coordinador_id, nombre_completo, contratista.
+    Retorna dict con coordinador_id, nombre_completo, contratista.
     None si no se encuentra.
     """
     sql = """
@@ -84,11 +40,8 @@ def identificar_coordinador_por_telegram_user_id(telegram_user_id, conn):
 
 def obtener_ots_del_coord(coordinador_id, conn):
     """
-    Trae las OTs activas del coord, separadas en dos grupos segun la
-    decision de diseno acordada (pendientes-de-asignar primero, luego
-    asignadas-a-cuadrilla).
-
-    Una sola query con JOIN; el split en grupos se hace en Python.
+    Trae las OTs activas del coord, separadas en dos grupos.
+    El SELECT incluye visita_fallida para mostrar el indicador.
     """
     sql = """
         SELECT ob.asignacion_id,
@@ -98,6 +51,7 @@ def obtener_ots_del_coord(coordinador_id, conn):
                ob.cuadrilla_id,
                ob.fecha_asignacion_cuadrilla,
                ob.notificacion_coordinador_recibida_at,
+               ob.visita_fallida,
                wo.worktype,
                wo.departamento,
                wo.ciudad,
@@ -127,7 +81,6 @@ def obtener_ots_del_coord(coordinador_id, conn):
         cols = [d[0] for d in cur.description]
         filas = [dict(zip(cols, row)) for row in cur.fetchall()]
 
-    # Particionar en dos grupos
     pendientes_asignar = [
         f for f in filas
         if f["estado"] == "pendiente_asignacion_coordinador"

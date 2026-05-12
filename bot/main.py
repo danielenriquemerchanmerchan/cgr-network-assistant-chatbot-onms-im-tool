@@ -23,6 +23,7 @@ import sys
 
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler
 
+from bot.handlers import visita_fallida
 from core.config import TELEGRAM_TOKEN, NOTIFICADOR_INTERVALO_SEG
 from bot.services.cache_catalogos import cargar_caches
 from bot.services.notificador_ot import notificar_pendientes_job
@@ -106,6 +107,7 @@ def main():
     app.add_handler(CommandHandler("avance",      avance.handle))
     app.add_handler(CommandHandler("cierre",      cierre.handle))
     app.add_handler(CommandHandler("bloqueo",     bloqueo.handle))
+    app.add_handler(CommandHandler("visita_fallida", visita_fallida.handle))
     app.add_handler(CommandHandler("reanudar",    reanudar.handle))
 
     # 6) Handler general para botones inline
@@ -127,7 +129,7 @@ def main():
     logger.info(
         "Handlers registrados: /admin_recargar, /start, /bandeja, /llegada, "
         "/midiendo, /hallazgo, /empalmando, /validando, /normalizado, "
-        "/retiro, /avance, /cierre, /bloqueo, /reanudar + botones inline"
+        "/retiro, /avance, /cierre, /bloqueo, /reanudar, /visita_fallida + botones inline"
     )
     logger.info(
         f"Job notificador_ot registrado (cada {NOTIFICADOR_INTERVALO_SEG}s)"

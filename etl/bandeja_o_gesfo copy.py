@@ -54,7 +54,6 @@ from domain.transformers.ot import construir_registro
 from domain.transformers.worklog import construir_registros_worklog
 
 from bot.services.asignador_ot import asignar_ots_pendientes
-from bot.services.limpiador_ot import limpiar_huerfanas
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -291,30 +290,6 @@ def sincronizar_bandeja():
             logging.exception(
                 f"[Asignador] Falla inesperada del asignador (el ETL "
                 f"continua con sus stats): {e}"
-            )
-
-        # 6.b. Limpiar OTs huerfanas (asignaciones cuya OT ya no esta en
-        # work_orders porque cambio de grupo, se cerro, etc.).
-        # Solo MARCA asignacion_activa=false. Los avisos a las cuadrillas
-        # quedan pendientes de implementar (futuro: integrar con notificador
-        # del bot).
-        try:
-            huerfanas = limpiar_huerfanas(conn)
-            if huerfanas:
-                logging.info(
-                    f"[Limpiador] {len(huerfanas)} OT(s) huerfana(s) "
-                    f"desactivada(s):"
-                )
-                for h in huerfanas:
-                    logging.info(
-                        f"[Limpiador] - asig={h['asignacion_id']} "
-                        f"wonum={h['wonum']} cuadrilla={h['cuadrilla_id']}"
-                    )
-            else:
-                logging.info("[Limpiador] No hay huerfanas para limpiar.")
-        except Exception as e:
-            logging.exception(
-                f"[Limpiador] Falla en limpieza de huerfanas: {e}"
             )
 
         # 7. Stats

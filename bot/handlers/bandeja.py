@@ -94,12 +94,17 @@ async def _bandeja_cuadrilla(update, context):
 
         for i, ot in enumerate(ots, start=1):
             urgencia = " 🚨" if ot["marcada_urgente_cgr"] else ""
+            marca_fallida = (
+                "\n  🚩 *VISITA FALLIDA - pendiente CGR*"
+                if ot.get("visita_fallida") else ""
+            )
             lineas.append(
                 f"*{i}. OT {ot['wonum']}*{urgencia}\n"
                 f"  📍 {ot['descripcion'] or '(sin descripcion)'}\n"
                 f"  🔧 Tipo: {ot['tipo_tramo'] or 'N/D'}\n"
                 f"  📊 Estado: _{ot['estado_descripcion']}_\n"
                 f"  ⚙️ Fase: _{ot['fase_descripcion']}_"
+                f"{marca_fallida}"
             )
             if ot["nota_urgencia_cgr"]:
                 lineas.append(f"  ⚠️ {ot['nota_urgencia_cgr']}")
@@ -177,9 +182,9 @@ async def _bandeja_coordinador(update, context):
         # 2) Traer las OTs activas del coord
         datos = obtener_ots_del_coord(coord["coordinador_id"], conn)
 
-        # 3) Formatear texto + construir botones para las pendientes
+        # 3) Formatear texto + construir botones (asignar pendientes + reasignar)
         texto = _formatear_bandeja_coord(coord, datos)
-        reply_markup = _construir_botones_pendientes(datos["pendientes_asignar"])
+        reply_markup = _construir_botones_bandeja_coord(datos)
 
         await update.message.reply_text(
             texto,
@@ -263,12 +268,24 @@ def _fmt_hace_cuanto(dt):
         return _fmt_fecha(dt)
 
 
+def _truncar_desc(texto, maximo=100):
+    """
+    Trunca un texto largo agregando '…' si se truncó.
+    Si es None o vacío, devuelve '—'.
+    """
+    if texto is None or (isinstance(texto, str) and texto.strip() == ""):
+        return "—"
+    t = str(texto).strip()
+    return (t[:maximo].rstrip() + "…") if len(t) > maximo else t
+
+
 def _formatear_ot_pendiente(ot):
     """Bloque de detalle para una OT pendiente de asignar (sin cuadrilla aun)."""
     return (
         f"• `{_norm(ot['wonum'])}` · {_norm(ot['worktype'])} · "
         f"Sev {_norm(ot['severity'])}\n"
         f"  📍 {_norm(ot['departamento'])} · {_norm(ot['ciudad'])}\n"
+        f"  📝 {_truncar_desc(ot['description'])}\n"
         f"  🏢 {_norm(ot['operador_fo'])}\n"
         f"  └─ Acusada {_fmt_hace_cuanto(ot['notificacion_coordinador_recibida_at'])}, "
         f"sin cuadrilla aun"
@@ -279,14 +296,20 @@ def _formatear_ot_asignada(ot):
     """Bloque de detalle para una OT ya asignada a cuadrilla."""
     cuadrilla = _norm(ot["cuadrilla_nombre"]) if ot.get("cuadrilla_nombre") \
         else _norm(ot["cuadrilla_id"])
+    marca_fallida = (
+        "\n  🚩 *VISITA FALLIDA - pendiente CGR*"
+        if ot.get("visita_fallida") else ""
+    )
     return (
         f"• `{_norm(ot['wonum'])}` · {_norm(ot['worktype'])} · "
         f"Sev {_norm(ot['severity'])}\n"
         f"  📍 {_norm(ot['departamento'])} · {_norm(ot['ciudad'])}\n"
+        f"  📝 {_truncar_desc(ot['description'])}\n"
         f"  🏢 {_norm(ot['operador_fo'])}\n"
         f"  🔧 {cuadrilla}\n"
         f"  📊 Estado: _{_norm(ot['estado'])}_ / "
         f"Fase: _{_norm(ot['fase_operativa'])}_"
+        f"{marca_fallida}"
     )
 
 
@@ -331,28 +354,46 @@ def _formatear_bandeja_coord(coord, datos):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# BOTONES INLINE PARA ASIGNAR LAS OTs PENDIENTES
+# BOTONES INLINE PARA LAS OTs DE LA BANDEJA DEL COORD
 # ═══════════════════════════════════════════════════════════════════
 
-def _construir_botones_pendientes(ots_pendientes):
+def _construir_botones_bandeja_coord(datos):
     """
-    Construye el InlineKeyboardMarkup con un boton por cada OT pendiente
-    de asignar. Cada boton dispara el flujo de asignacion a cuadrilla.
+    Construye el InlineKeyboardMarkup con dos tipos de botones:
 
-    callback_data: asig_iniciar|<asignacion_id>
+    1. Para cada OT PENDIENTE de asignar (los dejamos uno por OT
+       porque tipicamente son pocas y es accion urgente):
+       [🔧 Asignar XXXXX]   ->  asig_iniciar|<asig>
 
-    Si no hay OTs pendientes, retorna None (Telegram no muestra teclado).
+    2. UN solo botón [🔄 Reasignar OT...] que abre menu de seleccion
+       si hay 1+ OTs asignadas:
+                            ->  reasig_menu
+
+    Si no hay OTs activas, retorna None.
     """
-    if not ots_pendientes:
+    pendientes = datos.get("pendientes_asignar", [])
+    asignadas  = datos.get("asignadas_a_cuadrilla", [])
+
+    if not pendientes and not asignadas:
         return None
 
     keyboard = []
-    for ot in ots_pendientes:
-        texto_boton = f"🔧 Asignar {ot['wonum']}"
+
+    # Botones de asignar (uno por OT pendiente)
+    for ot in pendientes:
         keyboard.append([
             InlineKeyboardButton(
-                text=texto_boton,
+                text=f"🔧 Asignar {ot['wonum']}",
                 callback_data=f"asig_iniciar|{ot['asignacion_id']}",
+            )
+        ])
+
+    # Boton unico para reasignar (abre menu si hay asignadas)
+    if asignadas:
+        keyboard.append([
+            InlineKeyboardButton(
+                text="🔄 Reasignar OT...",
+                callback_data="reasig_menu",
             )
         ])
 

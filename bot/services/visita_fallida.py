@@ -6,10 +6,7 @@ Logica de BD para declarar visita fallida sobre una OT.
 PROPOSITO:
     Cuando la cuadrilla declara que la visita al sitio fue fallida
     (ej. el problema no era de fibra, era del cliente, etc.), este
-    servicio:
-        1. Marca la OT como visita_fallida=true en ot_bandeja.
-        2. Crea un worklog tipo 'visita_fallida' con la razon.
-        3. Notifica al grupo de la cuadrilla.
+    servicio marca la OT como visita_fallida=true en ot_bandeja.
 
 REGLAS:
     - Solo se permite si la OT esta activa.
@@ -17,7 +14,8 @@ REGLAS:
     - Despues de declarada, los comandos de avance se bloquean (eso lo
       controla el handler de cada comando, no este servicio).
 
-NO HACE:
+NO HACE (patron B: servicio solo toca estado de negocio):
+    - No escribe en bot_interacciones (lo hace el handler).
     - No envia mensajes Telegram (eso es del handler).
     - No valida estructura del texto (la razon es texto libre).
 
@@ -25,9 +23,10 @@ CONTRATOS PUBLICOS:
     obtener_ot_para_visita_fallida(asignacion_id, conn) -> dict | None
         Datos minimos para validar y mostrar confirmacion.
 
-    marcar_visita_fallida(asignacion_id, razon, cuadrilla_id, conn) -> bool
-        Hace el UPDATE + INSERT worklog. Idempotente: si ya estaba
-        marcada, retorna False.
+    marcar_visita_fallida(asignacion_id, conn) -> str | None
+        Hace el UPDATE en ot_bandeja. Idempotente: si ya estaba
+        marcada o la OT no esta activa, retorna None. Si exitoso,
+        retorna el wonum.
 
     ot_esta_bloqueada_por_visita_fallida(asignacion_id, conn) -> bool
         Helper para que los handlers de avance verifiquen si la OT
@@ -73,32 +72,12 @@ def obtener_ot_para_visita_fallida(asignacion_id, conn):
 # ESCRITURA: declarar visita fallida
 # ═══════════════════════════════════════════════════════════════════
 
-def marcar_visita_fallida(
-    asignacion_id,
-    razon,
-    cuadrilla_id,
-    conn,
-    telegram_chat_id=None,
-    telegram_chat_title=None,
-    telegram_user_id=None,
-    telegram_username=None,
-    telegram_message_id=None,
-):
+def marcar_visita_fallida(asignacion_id, conn):
     """
-    Marca la OT como visita_fallida y crea el registro conversacional.
+    Marca la OT como visita_fallida=true en ot_bandeja.
 
-    Hace DOS cosas:
-        1) UPDATE en ot_bandeja (visita_fallida=true).
-        2) INSERT en bot_interacciones (log conversacional + datos
-           para sincronizacion futura con Maximo).
-
-    NO escribe en onms.worklogs porque esa tabla es una replica/cache
-    de Maximo (todas las filas tienen worklog_id UNIQUE NOT NULL que
-    asigna Maximo). Un proceso ETL inverso (PENDIENTE de implementar)
-    leera bot_interacciones donde sincronizado_maximo=false y
-    tipo_interaccion tiene genera_worklog_maximo=true en cat_tipo_interaccion,
-    y se encargara de crear el worklog en Maximo. Cuando se sincronice,
-    el ETL normal lo traera de vuelta a onms.worklogs con su worklog_id.
+    Solo toca estado de negocio. El log conversacional en
+    bot_interacciones lo registra el handler (patron B).
 
     Transicion:
         visita_fallida:  false -> true
@@ -106,19 +85,26 @@ def marcar_visita_fallida(
     NO cambia estado ni fase_operativa: la OT sigue activa hasta
     que el CGR la mueva en Maximo y el ETL la limpie.
 
-    Idempotencia: si ya estaba marcada (visita_fallida=true), no hace
-    nada y retorna False.
+    Idempotencia: si ya estaba marcada (visita_fallida=true) o la
+    OT no esta activa, no hace nada y retorna None.
+
+    NO escribe en onms.worklogs porque esa tabla es una replica/cache
+    de Maximo (todas las filas tienen worklog_id UNIQUE NOT NULL que
+    asigna Maximo). Un proceso ETL inverso (PENDIENTE de implementar)
+    leera bot_interacciones donde sincronizado_maximo=false y
+    tipo_interaccion tiene genera_worklog_maximo=true en
+    cat_tipo_interaccion, y se encargara de crear el worklog en
+    Maximo. Cuando se sincronice, el ETL normal lo traera de vuelta
+    a onms.worklogs con su worklog_id.
 
     Parametros:
-        asignacion_id        : PK de la fila en ot_bandeja
-        razon                : texto libre que escribio la cuadrilla
-        cuadrilla_id         : codigo de la cuadrilla que declara
-        telegram_*           : datos del mensaje de Telegram para el
-                               CHECK constraint chk_telegram_coherente.
+        asignacion_id : PK de la fila en ot_bandeja
+        conn          : conexion abierta (no hace commit; el caller decide)
 
-    Retorna True si exitoso, False si no.
+    Retorna:
+        wonum (str) si se actualizo.
+        None si no se pudo (ya estaba marcada o OT inactiva).
     """
-    # 1) UPDATE en ot_bandeja con condicion para idempotencia
     sql_update = """
         UPDATE onms.ot_bandeja
            SET visita_fallida = true
@@ -133,81 +119,17 @@ def marcar_visita_fallida(
         if row is None:
             logger.warning(
                 f"[VisitaFallida] No se actualizo nada para "
-                f"asignacion_id={asignacion_id}. Probablemente ya estaba "
-                f"declarada o la OT no esta activa."
+                f"asignacion_id={asignacion_id}. Probablemente ya "
+                f"estaba declarada o la OT no esta activa."
             )
-            return False
+            return None
         wonum = row[0]
-
-    # 2) INSERT en onms.bot_interacciones (log conversacional + fuente
-    #    de verdad para sincronizacion futura con Maximo).
-    #    Incluye todos los campos de Telegram para satisfacer el CHECK
-    #    chk_telegram_coherente.
-    sql_botint = """
-        INSERT INTO onms.bot_interacciones (
-            fecha_hora,
-            asignacion_id,
-            wonum,
-            cuadrilla_id,
-            tipo_interaccion,
-            direccion,
-            nivel_urgencia,
-            actor_tipo,
-            actor_id,
-            telegram_chat_id,
-            telegram_chat_title_snapshot,
-            telegram_message_id,
-            telegram_user_id,
-            telegram_username,
-            contenido_texto,
-            metadata,
-            estado_procesamiento
-        )
-        VALUES (
-            NOW(),
-            %s,
-            %s,
-            %s,
-            'visita_fallida',
-            'entrante',
-            'alta',
-            'cuadrilla',
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            %s,
-            'procesado'
-        )
-    """
-    import json
-    with conn.cursor() as cur:
-        cur.execute(sql_botint, (
-            asignacion_id,
-            wonum,
-            cuadrilla_id,
-            cuadrilla_id,                       # actor_id
-            telegram_chat_id,
-            telegram_chat_title,
-            telegram_message_id,
-            telegram_user_id,
-            telegram_username,
-            f"/visita_fallida {razon}",         # contenido_texto
-            json.dumps({                        # metadata
-                "razon": razon,
-                "description_long": razon,      # para uso del ETL inverso
-            }),
-        ))
 
     logger.info(
         f"[VisitaFallida] asignacion_id={asignacion_id} (wonum={wonum}) "
-        f"marcada por cuadrilla={cuadrilla_id}. "
-        f"bot_interaccion creado (pendiente sync Maximo)."
+        f"marcada visita_fallida=true."
     )
-    return True
+    return wonum
 
 
 # ═══════════════════════════════════════════════════════════════════

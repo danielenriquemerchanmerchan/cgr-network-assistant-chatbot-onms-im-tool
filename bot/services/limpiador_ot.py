@@ -10,9 +10,16 @@ PROPOSITO:
     en ot_bandeja queda activa, generando huerfanas.
 
     Este modulo detecta esas huerfanas y:
-        1. Marca asignacion_activa = false.
-        2. Devuelve la lista de OTs marcadas para que el ETL (o el
+        1. Marca asignacion_activa = false (UPDATE).
+        2. Commitea la transaccion (atomiza su propio trabajo).
+        3. Devuelve la lista de OTs marcadas para que el ETL (o el
            bot) avise a las cuadrillas afectadas.
+
+MODELO TRANSACCIONAL (Modelo A — servicio dueno de la transaccion):
+    El servicio commitea internamente. Toda la limpieza es una sola
+    transaccion: o se desactivan todas las huerfanas detectadas, o
+    ninguna. Si algo falla, rollback y el proximo ciclo reintentara.
+    El llamador (ETL) NO necesita hacer commit ni rollback.
 
 NO HACE:
     - No borra filas. Solo cambia el flag (preserva historial).
@@ -21,8 +28,8 @@ NO HACE:
 
 CONTRATO PUBLICO:
     limpiar_huerfanas(conn) -> list[dict]
-        Marca las huerfanas y devuelve la lista para que el llamador
-        decida que hacer con cada una.
+        Marca las huerfanas, commitea, y devuelve la lista para que
+        el llamador decida que hacer con cada una.
 
         Cada dict tiene:
             asignacion_id, wonum, cuadrilla_id, telegram_chat_id (de la cuadrilla)
@@ -38,9 +45,16 @@ def limpiar_huerfanas(conn):
     Marca como inactivas las filas de ot_bandeja cuya OT ya no existe
     en work_orders. Devuelve la lista de filas afectadas.
 
-    El UPDATE es atomico: se hace en una sola query con WHERE y RETURNING.
+    Modelo A — atomiza su propio trabajo:
+        - Ejecuta el UPDATE.
+        - Si OK, commit y retorna la lista de filas.
+        - Si falla algo, rollback y propaga la excepcion.
+
+    El UPDATE es atomico (una sola query con WHERE y RETURNING): o se
+    desactivan todas las huerfanas detectadas, o ninguna.
 
     Retorna list[dict] (puede ser []).
+    Propaga excepciones de BD para que el llamador las pueda loguear.
     """
     sql = """
         WITH huerfanas AS (
@@ -66,10 +80,17 @@ def limpiar_huerfanas(conn):
                   onms.ot_bandeja.cuadrilla_id,
                   huerfanas.chat_id_cuadrilla
     """
-    with conn.cursor() as cur:
-        cur.execute(sql)
-        filas = cur.fetchall()
-        if not filas:
-            return []
-        cols = [d[0] for d in cur.description]
-        return [dict(zip(cols, row)) for row in filas]
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            filas = cur.fetchall()
+            if not filas:
+                resultado = []
+            else:
+                cols = [d[0] for d in cur.description]
+                resultado = [dict(zip(cols, row)) for row in filas]
+        conn.commit()
+        return resultado
+    except Exception:
+        conn.rollback()
+        raise

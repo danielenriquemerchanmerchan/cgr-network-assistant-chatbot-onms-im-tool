@@ -36,7 +36,12 @@ def obtener_ots_activas_cuadrilla(cuadrilla_id):
                     ob.fecha_asignacion_cuadrilla,
                     ob.marcada_urgente_cgr,
                     ob.nota_urgencia_cgr,
-                    ob.visita_fallida
+                    ob.visita_fallida,
+                    wo.departamento,
+                    wo.ciudad,
+                    wo.worktype,
+                    wo.severity,
+                    wo.operador_fo
                 FROM onms.ot_bandeja ob
                 LEFT JOIN onms.work_orders wo ON wo.wonum = ob.wonum
                 JOIN onms.cat_estado_ot_bandeja ce ON ce.codigo = ob.estado
@@ -70,6 +75,11 @@ def obtener_ots_activas_cuadrilla(cuadrilla_id):
                     "marcada_urgente_cgr":         row[9],
                     "nota_urgencia_cgr":           row[10],
                     "visita_fallida":              row[11],
+                    "departamento":                row[12],
+                    "ciudad":                      row[13],
+                    "worktype":                    row[14],
+                    "severity":                    row[15],
+                    "operador_fo":                 row[16],
                 }
                 for row in rows
             ]

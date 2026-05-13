@@ -211,3 +211,17 @@ MAXIMO_CLASIFICACIONES = {
         "worktype": "EM"
     },
 }
+
+# ────────────────────────────────────────────────────────────────────
+# MECANISMO A+B: OT activa por cuadrilla + pin en Telegram
+# ────────────────────────────────────────────────────────────────────
+#
+# Si True, el bot pinea un mensaje en el grupo de la cuadrilla con los
+# datos de la OT activa cada vez que cambia. Despinea el anterior si lo
+# habia. Si False, el bot solo gestiona ot_activa_id en BD sin tocar pins
+# (util si en algun grupo el bot pierde permisos de pin o si se quiere
+# desactivar temporalmente sin redeploy).
+#
+# Requisito si esta en True: el bot debe ser admin con permiso
+# "Pin messages" en cada grupo de cuadrilla.
+PINEAR_OT_ACTIVA = True

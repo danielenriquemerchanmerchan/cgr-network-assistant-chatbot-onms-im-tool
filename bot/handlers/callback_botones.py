@@ -36,6 +36,10 @@ Flujo de visita fallida:
 18. visfall_elegir|<asig>                -> coord eligio OT cuando habia varias
 19. visfall_confirmar|<asig>             -> ejecuta visita fallida + worklog
 
+Flujo de OT activa (Mecanismo A+B):
+20. cuad_cambiar_menu                    -> mostrar menu de seleccion de OT
+21. cuad_activar|<asig>                  -> activar la OT seleccionada
+
 Toda la informacion de catalogos se lee de BD en cada callback.
 """
 
@@ -72,6 +76,10 @@ from bot.services.visita_fallida import (
     marcar_visita_fallida,
 )
 from bot.services.cache_catalogos import obtener_mensaje
+from bot.handlers.cuad_activar import (
+    mostrar_menu_cambiar_ot,
+    ejecutar_activacion,
+)
 from integrations.postgres.client import obtener_conexion, cerrar_conexion
 
 logger = logging.getLogger(__name__)
@@ -151,11 +159,16 @@ async def handle(update, context):
             await _visfall_elegir_ot(query, partes, update, context)
         elif accion == "visfall_confirmar":
             await _visfall_confirmar(query, partes, update, context)
+        elif accion == "cuad_cambiar_menu":
+            await mostrar_menu_cambiar_ot(query, update, context)
+        elif accion == "cuad_activar":
+            await ejecutar_activacion(query, partes, update, context)
         else:
             logger.warning(f"Callback desconocido: {data}")
             await query.edit_message_text(
                 "⚠️ Acción no reconocida. Por favor inicia de nuevo con /bloqueo"
             )
+
     except Exception as e:
         logger.error(f"Error procesando callback {data}: {e}", exc_info=True)
         # Para callbacks de bloqueo damos instruccion clara. Para otros
@@ -1823,24 +1836,14 @@ async def _visfall_confirmar(query, partes, update, context):
             )
             return
 
-        # Ejecutar la marcacion
-        # OJO: razon SIN _escapar_md (eso es solo para display Markdown).
-        # En BD guardamos el texto original que escribio la cuadrilla.
-        msg = query.message
-        ok = marcar_visita_fallida(
+        # Ejecutar la marcacion (solo toca ot_bandeja).
+        wonum_ok = marcar_visita_fallida(
             asignacion_id=asignacion_id,
-            razon=razon,
-            cuadrilla_id=cuadrilla_id,
             conn=conn,
-            telegram_chat_id=update.effective_chat.id,
-            telegram_chat_title=(update.effective_chat.title or ""),
-            telegram_user_id=update.effective_user.id,
-            telegram_username=update.effective_user.username,
-            telegram_message_id=msg.message_id if msg else None,
         )
         conn.commit()
 
-        if not ok:
+        if wonum_ok is None:
             await query.edit_message_text(
                 text=(
                     f"⚠️ No se pudo marcar la OT {wonum}. "
@@ -1848,6 +1851,35 @@ async def _visfall_confirmar(query, partes, update, context):
                 ),
             )
             return
+
+        # Registrar la interaccion en bot_interacciones (patron B:
+        # handler registra, servicio solo toca estado de negocio).
+        # nivel_urgencia='alta' override para que una visita fallida
+        # sea muy visible en el tablero.
+        # En BD guardamos la razon original (sin _escapar_md, eso es
+        # solo para display Markdown).
+        registrar_interaccion(
+            tipo_interaccion="visita_fallida",
+            direccion="entrante",
+            actor_tipo="cuadrilla",
+            actor_id=cuadrilla_id,
+            cuadrilla_id=cuadrilla_id,
+            wonum=wonum,
+            asignacion_id=asignacion_id,
+            telegram_chat_id=update.effective_chat.id,
+            telegram_chat_title=(update.effective_chat.title or ""),
+            telegram_message_id=(
+                query.message.message_id if query.message else None
+            ),
+            telegram_user_id=update.effective_user.id,
+            telegram_username=update.effective_user.username,
+            contenido_texto=razon,
+            nivel_urgencia="alta",
+            metadata={
+                "razon": razon,
+                "description_long": razon,  # para el ETL inverso a Maximo
+            },
+        )
 
         # Mensaje final
         texto = obtener_mensaje(

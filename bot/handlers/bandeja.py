@@ -24,6 +24,7 @@ from bot.services.bandeja_coord import (
 )
 from bot.services.ot_activa import obtener_ot_activa
 from bot.services.interacciones import registrar_interaccion
+from bot.handlers._markdown import md, md_or_dash, md_trunc, md_dept_abbr
 from integrations.postgres.client import obtener_conexion, cerrar_conexion
 
 logger = logging.getLogger(__name__)
@@ -51,24 +52,10 @@ async def handle(update, context):
 
 
 # ═══════════════════════════════════════════════════════════════════
-# RAMA CUADRILLA — diseno con OT activa destacada + en espera
+# RAMA CUADRILLA
 # ═══════════════════════════════════════════════════════════════════
 
 async def _bandeja_cuadrilla(update, context):
-    """
-    Muestra la bandeja de la cuadrilla con el diseno de Mecanismo A:
-        - Si hay una OT activa: la muestra arriba destacada (todos los
-          campos) bajo el encabezado "✅ TRABAJANDO AHORA".
-        - Las demas OTs ("en espera") salen abajo con info reducida en
-          cursiva.
-        - Si no hay OT activa todavia: aviso explicito + todas las OTs
-          listadas como "en espera".
-
-    Boton inline al final:
-        - "🔄 Cambiar OT activa" si hay >=1 OT distinta a la activa.
-        - No aparece si solo hay 1 OT y ya es la activa.
-        - No aparece si la cuadrilla no tiene OTs.
-    """
     chat_id    = update.effective_chat.id
     chat_title = update.effective_chat.title or ""
     user       = update.effective_user
@@ -81,16 +68,14 @@ async def _bandeja_cuadrilla(update, context):
         )
         return
 
-    # Lista completa de OTs activas (en bandeja)
     ots = obtener_ots_activas_cuadrilla(cuadrilla["cuadrilla_id"])
 
     if not ots:
         await update.message.reply_text(
-            f"ℹ️ La bandeja de *{cuadrilla['nombre']}* esta vacia.\n\n"
+            f"ℹ️ La bandeja de *{md(cuadrilla['nombre'])}* esta vacia.\n\n"
             f"No hay OTs activas asignadas en este momento.",
             parse_mode="Markdown",
         )
-        # Registrar y salir
         registrar_interaccion(
             tipo_interaccion="mensaje_libre",
             direccion="entrante",
@@ -105,12 +90,8 @@ async def _bandeja_cuadrilla(update, context):
             contenido_texto="/bandeja",
             metadata={"comando": "/bandeja", "ots_listadas": 0},
         )
-        logger.info(
-            f"Bandeja consultada por {cuadrilla['cuadrilla_id']}: 0 OTs"
-        )
         return
 
-    # Necesitamos la OT activa actual para destacarla.
     conn = obtener_conexion()
     if conn is None:
         await update.message.reply_text(
@@ -125,29 +106,21 @@ async def _bandeja_cuadrilla(update, context):
 
     activa_id = ot_activa["asignacion_id"] if ot_activa else None
 
-    # Separar lista en activa vs en espera (preservando orden original
-    # para las en espera).
     ots_en_espera = [ot for ot in ots if ot["asignacion_id"] != activa_id]
-    # La activa la sacamos de la lista de candidatas a destacar SI
-    # esta efectivamente en la bandeja (defensa: si por carrera
-    # quedo apuntando a algo desactivado, ot_activa sera None).
     ot_destacada = None
     if ot_activa:
         ot_destacada = next(
             (ot for ot in ots if ot["asignacion_id"] == activa_id), None
         )
 
-    # Armar texto
     lineas = []
-    lineas.append(f"📋 *Bandeja de {cuadrilla['nombre']}*")
+    lineas.append(f"📋 *Bandeja de {md(cuadrilla['nombre'])}*")
     lineas.append(f"_{len(ots)} OT(s) activa(s)_\n")
 
     if ot_destacada is not None:
         lineas.append("✅ *TRABAJANDO AHORA*")
         lineas.append(_formatear_ot_cuadrilla_destacada(ot_destacada))
     else:
-        # No hay OT activa todavia (caso al inicio del dia, o la activa
-        # quedo apuntando a algo que ya no esta)
         lineas.append("⚠️ *No has activado ninguna OT todavía*")
         lineas.append(
             "_Cuando actives una, los comandos como /midiendo, /cierre, "
@@ -163,8 +136,6 @@ async def _bandeja_cuadrilla(update, context):
 
     texto = "\n".join(lineas).rstrip()
 
-    # Boton inline "Cambiar OT activa". Aparece si hay >=1 OT en espera
-    # (es decir, hay algo distinto a la activa a lo que cambiarse).
     reply_markup = None
     if ots_en_espera:
         keyboard = [[
@@ -198,11 +169,6 @@ async def _bandeja_cuadrilla(update, context):
             "ots_listadas": len(ots),
             "tiene_ot_activa": ot_destacada is not None,
         },
-    )
-
-    logger.info(
-        f"Bandeja consultada por {cuadrilla['cuadrilla_id']}: {len(ots)} OTs "
-        f"(activa: {ot_destacada['wonum'] if ot_destacada else 'ninguna'})"
     )
 
 
@@ -258,11 +224,6 @@ async def _bandeja_coordinador(update, context):
             },
         )
 
-        logger.info(
-            f"Bandeja consultada por coord {coord['coordinador_id']}: "
-            f"{datos['total']} OTs"
-        )
-
     finally:
         cerrar_conexion(conn)
 
@@ -270,14 +231,6 @@ async def _bandeja_coordinador(update, context):
 # ═══════════════════════════════════════════════════════════════════
 # HELPERS DE FORMATO
 # ═══════════════════════════════════════════════════════════════════
-
-def _norm(valor):
-    if valor is None:
-        return "—"
-    if isinstance(valor, str) and valor.strip() == "":
-        return "—"
-    return valor
-
 
 def _fmt_fecha(dt):
     if dt is None:
@@ -307,24 +260,6 @@ def _fmt_hace_cuanto(dt):
         return _fmt_fecha(dt)
 
 
-def _truncar_desc(texto, maximo=100):
-    if texto is None or (isinstance(texto, str) and texto.strip() == ""):
-        return "—"
-    t = str(texto).strip()
-    return (t[:maximo].rstrip() + "…") if len(t) > maximo else t
-
-
-def _abreviar_departamento(depto):
-    if depto is None or not isinstance(depto, str) or not depto.strip():
-        return "—"
-    palabras = depto.strip().upper().split()
-    saltar = {"LA", "EL", "LOS", "LAS", "DE", "DEL"}
-    for palabra in palabras:
-        if palabra not in saltar:
-            return palabra
-    return palabras[0]
-
-
 def _agrupar_ots_por_cuadrilla(ots):
     grupos = {}
     orden = []
@@ -340,57 +275,49 @@ def _agrupar_ots_por_cuadrilla(ots):
 
 
 def _formatear_ot_cuadrilla_destacada(ot):
-    """
-    Formato de la OT activa (TRABAJANDO AHORA) en /bandeja de cuadrilla.
-    Info completa, sin cursiva, con el emoji 🔧.
-    """
     marca_fallida = (
         "\n  🚩 *VISITA FALLIDA - pendiente CGR*"
         if ot.get("visita_fallida") else ""
     )
     urgencia = " 🚨" if ot.get("marcada_urgente_cgr") else ""
     nota_urgencia = (
-        f"\n  ⚠️ {ot['nota_urgencia_cgr']}"
+        f"\n  ⚠️ {md(ot['nota_urgencia_cgr'])}"
         if ot.get("nota_urgencia_cgr") else ""
     )
     return (
-        f"🔧 *{_norm(ot['wonum'])}*{urgencia} · "
-        f"{_norm(ot['worktype'])} · Sev {_norm(ot['severity'])} · "
-        f"{_abreviar_departamento(ot['departamento'])}/{_norm(ot['ciudad'])}\n"
-        f"  {_truncar_desc(ot['descripcion'])}\n"
-        f"  🏢 {_norm(ot['operador_fo'])}\n"
-        f"  Estado: _{_norm(ot['estado_descripcion'])}_ / "
-        f"Fase: _{_norm(ot['fase_descripcion'])}_"
+        f"🔧 *{md_or_dash(ot['wonum'])}*{urgencia} · "
+        f"{md_or_dash(ot['worktype'])} · Sev {md_or_dash(ot['severity'])} · "
+        f"{md_dept_abbr(ot['departamento'])}/{md_or_dash(ot['ciudad'])}\n"
+        f"  {md_trunc(ot['descripcion'])}\n"
+        f"  🏢 {md_or_dash(ot['operador_fo'])}\n"
+        f"  Estado: _{md_or_dash(ot['estado_descripcion'])}_ / "
+        f"Fase: _{md_or_dash(ot['fase_descripcion'])}_"
         f"{marca_fallida}"
         f"{nota_urgencia}"
     )
 
 
 def _formatear_ot_cuadrilla_en_espera(ot):
-    """
-    Formato de OT en espera en /bandeja de cuadrilla.
-    Info reducida, todo en cursiva, con bullet 🔹.
-    """
     marca_fallida = (
         "\n   🚩 *VISITA FALLIDA - pendiente CGR*"
         if ot.get("visita_fallida") else ""
     )
     return (
-        f"🔹 _{_norm(ot['wonum'])} · "
-        f"{_norm(ot['worktype'])} · Sev {_norm(ot['severity'])} · "
-        f"{_abreviar_departamento(ot['departamento'])}/{_norm(ot['ciudad'])}_\n"
-        f"   _{_truncar_desc(ot['descripcion'])}_"
+        f"🔹 _{md_or_dash(ot['wonum'])} · "
+        f"{md_or_dash(ot['worktype'])} · Sev {md_or_dash(ot['severity'])} · "
+        f"{md_dept_abbr(ot['departamento'])}/{md_or_dash(ot['ciudad'])}_\n"
+        f"   _{md_trunc(ot['descripcion'])}_"
         f"{marca_fallida}"
     )
 
 
 def _formatear_ot_pendiente(ot):
     return (
-        f"• `{_norm(ot['wonum'])}` · {_norm(ot['worktype'])} · "
-        f"Sev {_norm(ot['severity'])}\n"
-        f"  📍 {_norm(ot['departamento'])} · {_norm(ot['ciudad'])}\n"
-        f"  📝 {_truncar_desc(ot['description'])}\n"
-        f"  🏢 {_norm(ot['operador_fo'])}\n"
+        f"• `{md_or_dash(ot['wonum'])}` · {md_or_dash(ot['worktype'])} · "
+        f"Sev {md_or_dash(ot['severity'])}\n"
+        f"  📍 {md_or_dash(ot['departamento'])} · {md_or_dash(ot['ciudad'])}\n"
+        f"  📝 {md_trunc(ot['description'])}\n"
+        f"  🏢 {md_or_dash(ot['operador_fo'])}\n"
         f"  └─ Acusada {_fmt_hace_cuanto(ot['notificacion_coordinador_recibida_at'])}, "
         f"sin cuadrilla aun"
     )
@@ -401,14 +328,19 @@ def _formatear_ot_asignada(ot):
         "\n  🚩 *VISITA FALLIDA - pendiente CGR*"
         if ot.get("visita_fallida") else ""
     )
+    # Usamos las descripciones legibles si vienen del JOIN; si no,
+    # caemos al codigo crudo. Las descripciones no tienen guiones bajos,
+    # asi que no chocan con Markdown.
+    estado_render = ot.get("estado_descripcion") or ot.get("estado")
+    fase_render = ot.get("fase_descripcion") or ot.get("fase_operativa")
     return (
-        f"• `{_norm(ot['wonum'])}` · {_norm(ot['worktype'])} · "
-        f"Sev {_norm(ot['severity'])} · "
-        f"{_abreviar_departamento(ot['departamento'])}/{_norm(ot['ciudad'])}\n"
-        f"  {_truncar_desc(ot['description'])}\n"
-        f"  🏢 {_norm(ot['operador_fo'])}\n"
-        f"  Estado: _{_norm(ot['estado'])}_ / "
-        f"Fase: _{_norm(ot['fase_operativa'])}_"
+        f"• `{md_or_dash(ot['wonum'])}` · {md_or_dash(ot['worktype'])} · "
+        f"Sev {md_or_dash(ot['severity'])} · "
+        f"{md_dept_abbr(ot['departamento'])}/{md_or_dash(ot['ciudad'])}\n"
+        f"  {md_trunc(ot['description'])}\n"
+        f"  🏢 {md_or_dash(ot['operador_fo'])}\n"
+        f"  Estado: _{md_or_dash(estado_render)}_ / "
+        f"Fase: _{md_or_dash(fase_render)}_"
         f"{marca_fallida}"
     )
 
@@ -418,10 +350,14 @@ def _formatear_bandeja_coord(coord, datos):
     asignadas  = datos["asignadas_a_cuadrilla"]
 
     lineas = []
-    lineas.append(f"📋 *Bandeja del Coordinador {coord['nombre_completo']}*\n")
+    lineas.append(
+        f"📋 *Bandeja del Coordinador {md(coord['nombre_completo'])}*\n"
+    )
 
     if datos["total"] == 0:
-        lineas.append("_Tu bandeja esta vacia. No tienes OTs activas en este momento._")
+        lineas.append(
+            "_Tu bandeja esta vacia. No tienes OTs activas en este momento._"
+        )
         return "\n".join(lineas)
 
     if pendientes:
@@ -441,7 +377,8 @@ def _formatear_bandeja_coord(coord, datos):
                 lineas.append("─────────────────────────────────")
             n = len(ots_grupo)
             sufijo = "OTs" if n != 1 else "OT"
-            lineas.append(f"🛠 *{nombre_cuadrilla}* ({n} {sufijo})")
+            lineas.append(f"🛠 *{md(nombre_cuadrilla)}* ({n} {sufijo})")
+            lineas.append("")
             for ot in ots_grupo:
                 lineas.append(_formatear_ot_asignada(ot))
                 lineas.append("")

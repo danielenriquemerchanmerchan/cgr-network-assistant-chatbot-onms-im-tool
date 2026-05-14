@@ -21,14 +21,15 @@ CAMBIOS RECIENTES:
 import logging
 import sys
 
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters
 
-from bot.handlers import visita_fallida
+
 from core.config import TELEGRAM_TOKEN, NOTIFICADOR_INTERVALO_SEG
 from bot.services.cache_catalogos import cargar_caches
 from bot.services.notificador_ot import notificar_pendientes_job
 from bot.handlers import (
     start,
+    reportar,
     bandeja,
     llegada,
     midiendo,
@@ -43,6 +44,7 @@ from bot.handlers import (
     reanudar,
     callback_botones,
     admin,
+    visita_fallida
 )
 
 
@@ -96,6 +98,7 @@ def main():
 
     # 5) Registrar handlers de comandos operativos
     app.add_handler(CommandHandler("start",       start.handle))
+    app.add_handler(CommandHandler("reportar",    reportar.handle))
     app.add_handler(CommandHandler("bandeja",     bandeja.handle))
     app.add_handler(CommandHandler("llegada",     llegada.handle))
     app.add_handler(CommandHandler("midiendo",    midiendo.handle))
@@ -109,6 +112,8 @@ def main():
     app.add_handler(CommandHandler("bloqueo",     bloqueo.handle))
     app.add_handler(CommandHandler("visita_fallida", visita_fallida.handle))
     app.add_handler(CommandHandler("reanudar",    reanudar.handle))
+    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,reportar.recibir_texto_avance_libre,))
+   
 
     # 6) Handler general para botones inline
     app.add_handler(CallbackQueryHandler(callback_botones.handle))
@@ -127,7 +132,7 @@ def main():
     )
 
     logger.info(
-        "Handlers registrados: /admin_recargar, /start, /bandeja, /llegada, "
+        "Handlers registrados: /admin_recargar, /start, /reportar, /bandeja, /llegada, "
         "/midiendo, /hallazgo, /empalmando, /validando, /normalizado, "
         "/retiro, /avance, /cierre, /bloqueo, /reanudar, /visita_fallida + botones inline"
     )

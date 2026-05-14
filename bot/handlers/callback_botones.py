@@ -80,6 +80,13 @@ from bot.handlers.cuad_activar import (
     mostrar_menu_cambiar_ot,
     ejecutar_activacion,
 )
+from bot.handlers.reportar import (
+    callback_avance_libre as rep_callback_avance_libre,
+    callback_ver_mas as rep_callback_ver_mas,
+    callback_en_desplazamiento as rep_callback_en_desplazamiento,
+    callback_ya_llegamos_a_sitio as rep_callback_ya_llegamos_a_sitio,
+    callback_midiendo as rep_callback_midiendo,
+)
 from integrations.postgres.client import obtener_conexion, cerrar_conexion
 
 logger = logging.getLogger(__name__)
@@ -163,6 +170,16 @@ async def handle(update, context):
             await mostrar_menu_cambiar_ot(query, update, context)
         elif accion == "cuad_activar":
             await ejecutar_activacion(query, partes, update, context)
+        elif accion == "rep_avance_libre":
+            await rep_callback_avance_libre(query, update, context)
+        elif accion == "rep_ver_mas":
+            await rep_callback_ver_mas(query, update, context)
+        elif accion == "rep_en_desplazamiento":
+            await rep_callback_en_desplazamiento(query, update, context)
+        elif accion == "rep_ya_llegamos_a_sitio":
+            await rep_callback_ya_llegamos_a_sitio(query, update, context)
+        elif accion == "rep_midiendo":
+            await rep_callback_midiendo(query, update, context)
         else:
             logger.warning(f"Callback desconocido: {data}")
             await query.edit_message_text(

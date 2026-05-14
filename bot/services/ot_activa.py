@@ -136,7 +136,8 @@ def obtener_ot_activa(cuadrilla_id, conn):
     Retorna dict con:
         asignacion_id, wonum, estado, fase_operativa,
         marcada_urgente_cgr, nota_urgencia_cgr, visita_fallida,
-        descripcion, tipo_tramo, estado_descripcion, fase_descripcion
+        descripcion, tipo_tramo, worktype, severity, departamento,
+        ciudad, operador_fo, estado_descripcion, fase_descripcion
 
     Retorna None si:
         - La cuadrilla no tiene ot_activa_id (NULL).
@@ -154,6 +155,11 @@ def obtener_ot_activa(cuadrilla_id, conn):
                ob.visita_fallida,
                wo.description     AS descripcion,
                wo.tipo_tramo,
+               wo.worktype,
+               wo.severity,
+               wo.departamento,
+               wo.ciudad,
+               wo.operador_fo,
                ce.descripcion     AS estado_descripcion,
                cf.descripcion     AS fase_descripcion
           FROM onms.cuadrillas cu

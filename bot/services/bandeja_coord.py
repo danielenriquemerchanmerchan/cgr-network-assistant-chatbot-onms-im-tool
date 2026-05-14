@@ -41,7 +41,12 @@ def identificar_coordinador_por_telegram_user_id(telegram_user_id, conn):
 def obtener_ots_del_coord(coordinador_id, conn):
     """
     Trae las OTs activas del coord, separadas en dos grupos.
-    El SELECT incluye visita_fallida para mostrar el indicador.
+
+    Incluye JOINs a cat_estado_ot_bandeja y cat_fase_operativa para
+    obtener las descripciones legibles (estado_descripcion,
+    fase_descripcion). Estas descripciones se usan en el render del
+    handler para mostrar texto humano en lugar de codigos crudos
+    (que ademas contienen guiones bajos que rompen Markdown).
     """
     sql = """
         SELECT ob.asignacion_id,
@@ -62,12 +67,18 @@ def obtener_ots_del_coord(coordinador_id, conn):
                wo.cinum,
                wo.tipo_tramo,
                wo.direccion,
-               cu.nombre AS cuadrilla_nombre
+               cu.nombre          AS cuadrilla_nombre,
+               ce.descripcion     AS estado_descripcion,
+               cf.descripcion     AS fase_descripcion
           FROM onms.ot_bandeja ob
           LEFT JOIN onms.work_orders wo
                  ON ob.wonum = wo.wonum
           LEFT JOIN onms.cuadrillas cu
                  ON ob.cuadrilla_id = cu.cuadrilla_id
+          LEFT JOIN onms.cat_estado_ot_bandeja ce
+                 ON ce.codigo = ob.estado
+          LEFT JOIN onms.cat_fase_operativa cf
+                 ON cf.codigo = ob.fase_operativa
          WHERE ob.coordinador_asignado_id = %s
            AND ob.asignacion_activa = true
            AND ob.estado = ANY(%s)

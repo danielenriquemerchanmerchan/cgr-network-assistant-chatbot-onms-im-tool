@@ -27,7 +27,7 @@ import logging
 from datetime import datetime
 
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, execute_values  
 
 from core.config import (
     PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE,
@@ -184,6 +184,59 @@ def upsert_work_order(registro, conn):
 # 3. WORKLOGS - REEMPLAZO BULK
 # ═══════════════════════════════════════════════════════════════════
 
+# def reemplazar_worklogs(wonum, lista_worklogs, conn):
+#     """
+#     Reemplaza todos los worklogs de una OT.
+
+#     Estrategia: DELETE all + INSERT all en la misma transaccion.
+#     Es mas simple que diff worklog-por-worklog, y los volumenes son
+#     chicos (5-7 worklogs por OT en promedio).
+
+#     Argumentos:
+#         wonum: identificador de la OT
+#         lista_worklogs: lista de dicts con campos de worklog
+#         conn: conexion abierta
+
+#     Retorna: cantidad de worklogs insertados.
+#     """
+#     with conn.cursor() as cur:
+#         # 1. DELETE existentes
+#         cur.execute(
+#             f"DELETE FROM {SCHEMA}.worklogs WHERE wonum = %s",
+#             (wonum,)
+#         )
+
+#         if not lista_worklogs:
+#             return 0
+
+#         # 2. INSERT nuevos
+#         columnas_sql = ", ".join(CAMPOS_WORKLOG)
+#         placeholders = ", ".join(["%s"] * len(CAMPOS_WORKLOG))
+
+#         sql = f"""
+#             INSERT INTO {SCHEMA}.worklogs ({columnas_sql})
+#             VALUES ({placeholders})
+#             ON CONFLICT (worklog_id) DO NOTHING
+#         """
+
+#         valores = []
+#         for w in lista_worklogs:
+#             fila = tuple(w.get(c) for c in CAMPOS_WORKLOG)
+#             valores.append(fila)
+
+#         cur.executemany(sql, valores)
+#         return len(valores)
+    
+    
+# ═══════════════════════════════════════════════════════════════════
+# IMPORTANTE: agrega este import al inicio de postgres/client.py,
+# junto a los demas imports de psycopg2:
+#
+#     from psycopg2.extras import execute_values
+#
+# Luego reemplaza la funcion reemplazar_worklogs existente por esta:
+# ═══════════════════════════════════════════════════════════════════
+
 def reemplazar_worklogs(wonum, lista_worklogs, conn):
     """
     Reemplaza todos los worklogs de una OT.
@@ -191,6 +244,13 @@ def reemplazar_worklogs(wonum, lista_worklogs, conn):
     Estrategia: DELETE all + INSERT all en la misma transaccion.
     Es mas simple que diff worklog-por-worklog, y los volumenes son
     chicos (5-7 worklogs por OT en promedio).
+
+    [OPTIMIZACION 2026-05]
+    Usa execute_values en lugar de executemany. Diferencia clave:
+        - executemany: emite N INSERTs separados (uno por fila).
+          Con 3284 worklogs/ciclo = 3284 roundtrips a Postgres.
+        - execute_values: emite UN INSERT con todas las filas como
+          tuplas adicionales en el VALUES. Un solo roundtrip por OT.
 
     Argumentos:
         wonum: identificador de la OT
@@ -209,23 +269,25 @@ def reemplazar_worklogs(wonum, lista_worklogs, conn):
         if not lista_worklogs:
             return 0
 
-        # 2. INSERT nuevos
+        # 2. INSERT nuevos en un solo roundtrip
         columnas_sql = ", ".join(CAMPOS_WORKLOG)
-        placeholders = ", ".join(["%s"] * len(CAMPOS_WORKLOG))
 
+        # Nota: con execute_values el placeholder es UN SOLO `%s`
+        # despues de VALUES. La libreria expande internamente a
+        # VALUES (col1, col2, ...), (col1, col2, ...), ...
         sql = f"""
             INSERT INTO {SCHEMA}.worklogs ({columnas_sql})
-            VALUES ({placeholders})
+            VALUES %s
             ON CONFLICT (worklog_id) DO NOTHING
         """
 
-        valores = []
-        for w in lista_worklogs:
-            fila = tuple(w.get(c) for c in CAMPOS_WORKLOG)
-            valores.append(fila)
+        valores = [
+            tuple(w.get(c) for c in CAMPOS_WORKLOG)
+            for w in lista_worklogs
+        ]
 
-        cur.executemany(sql, valores)
-        return len(valores)
+        execute_values(cur, sql, valores, page_size=200)
+        return len(valores)    
 
 
 # ═══════════════════════════════════════════════════════════════════

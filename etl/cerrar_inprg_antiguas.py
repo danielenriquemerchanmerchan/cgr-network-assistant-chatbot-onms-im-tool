@@ -10,6 +10,11 @@ CONTEXTO:
     grande y heterogeneo (multiples tecnicos asignados), las cerramos
     directamente via API en lugar de coordinar caso por caso.
 
+FUENTE DE DATOS:
+    Maximo MXAPIWODETAIL via integrations.maximo.rest_api.listar_ots().
+    NO usa Postgres (la tabla onms.work_orders solo tiene OTs frescas,
+    no el historico que necesitamos para este caso).
+
 FLUJO DE ESTADOS EN MAXIMO:
     INPRG → COMP → CLOSE
 
@@ -18,18 +23,15 @@ FLUJO DE ESTADOS EN MAXIMO:
     refresque el statusdate).
 
 UNIVERSO QUE PROCESA (default):
+    - ownergroup = O_GESFO
+    - classstructureid = 4213
     - status = INPRG
-    - dias_abierta > DIAS_MINIMOS              ← default 90, configurable
+    - dias desde reportdate > DIAS_MINIMOS    ← default 90, configurable
     - sin filtro de tecnico                    ← TODAS las OTs candidatas
-    - ownergroup = O_GESFO (implicito por la fuente de datos)
 
 OPCIONALMENTE:
-    --tecnicos T1 T2 ...    restringe el universo a esos tecnicos
+    --tecnicos T1 T2 ...    restringe el universo a esos tecnicos (campo lead)
     --excluir-tecnicos T1 T2 ...   excluye esos tecnicos del universo
-
-FUENTE DE LA LISTA:
-    Postgres (schema onms.work_orders). Se asume ETL razonablemente fresco.
-    Si quieres datos al minuto, corre antes el ETL operativo.
 
 MODOS DE EJECUCION:
     1. Por defecto: DRY-RUN. Lista las OTs candidatas y las exporta a Excel,
@@ -53,11 +55,14 @@ USO:
     # 5. Cambiar el umbral de dias
     py -m etl.cerrar_inprg_antiguas --dias 60
 
-    # 6. Restringir a tecnicos especificos
+    # 6. Restringir a tecnicos especificos (campo lead)
     py -m etl.cerrar_inprg_antiguas --tecnicos LUIS.RODRIGUEZG NESTOR.RAMIREZ
 
     # 7. Excluir tecnicos (ej: dejar tranquilas las de LGMELENDEZHE)
     py -m etl.cerrar_inprg_antiguas --excluir-tecnicos LGMELENDEZHE
+
+    # 8. Saltar el enriquecimiento (mas rapido, sin coordinador/lider/eecc)
+    py -m etl.cerrar_inprg_antiguas --sin-enriquecer
 
 SALIDA:
     output/Cierre_INPRG_Antiguas_{MODO}_{YYYYMMDD_HHMMSS}.xlsx
@@ -66,19 +71,22 @@ SALIDA:
 """
 
 import argparse
-import logging
 import time
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
-from psycopg2.extras import RealDictCursor
 
 from core.logging_setup import logger
-from integrations.postgres.client import obtener_conexion, cerrar_conexion
-from integrations.maximo.rest_api import cambiar_estado, _obtener_href, _cerrar_sesion
+from integrations.maximo.rest_api import (
+    cambiar_estado,
+    listar_ots,
+    obtener_detalle_ot,
+    obtener_ci_description,
+)
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -86,9 +94,8 @@ from integrations.maximo.rest_api import cambiar_estado, _obtener_href, _cerrar_
 # ════════════════════════════════════════════════════════════════════
 
 DIAS_MINIMOS_DEFAULT = 90
-
-# Por defecto NO se filtra por tecnico: el universo es TODAS las OTs INPRG
-# antiguas. Se puede restringir con --tecnicos o excluir con --excluir-tecnicos.
+OWNERGROUP           = "O_GESFO"
+CLASSSTRUCTUREID     = "4213"
 
 # Pausa entre PATCH INPRG→COMP y COMP→CLOSE. Maximo a veces necesita
 # unos segundos para refrescar el statusdate antes del siguiente cambio.
@@ -97,84 +104,41 @@ PAUSA_ENTRE_PATCH_SEG = 2
 # Pausa entre OTs (para no saturar Maximo)
 PAUSA_ENTRE_OTS_SEG = 1
 
+# Atributos del workorderspec que queremos extraer al enriquecer.
+# El array workorderspec es una lista de objetos {assetattrid, alnvalue, ...}.
+# Mapeamos assetattrid → clave de salida.
+SPEC_ATTR_MAP = {
+    "COORDINADOR_RED_FO":   "coordinador",
+    "LIDER_DE_ZONA_FO":     "lider_zona",
+    "EECC_CUADRILLA_FO":    "eecc",
+    "NUMERO_CASO_FO":       "numero_caso",
+    "TIPO_OPERACION_FO":    "tipo_operacion",
+}
+
 
 # ════════════════════════════════════════════════════════════════════
-# QUERY: OTs candidatas
+# COLUMNAS DEL EXCEL
 # ════════════════════════════════════════════════════════════════════
-# El filtro por tecnico es opcional. Si no se pasan tecnicos, se procesan
-# TODAS las OTs INPRG con mas de N dias. Si se pasan via --tecnicos o
-# --excluir-tecnicos, se aplica el filtro correspondiente.
 
-QUERY_BASE = """
-SELECT
-    wo.wonum,
-    wo.cinum,
-    wo.ci_description,
-    wo.description AS resumen,
-    wo.assigned_to AS tecnico,
-    wo.coordinador_red_fo AS coordinador,
-    wo.lider_de_zona_fo AS lider_zona,
-    wo.location AS codigo_sitio,
-    wo.nom_ubicacion AS nombre_sitio,
-    wo.creation_date AS fecha_creacion,
-    EXTRACT(EPOCH FROM (NOW() - wo.creation_date)) / 86400 AS dias_abierta,
-    wo.status,
-    wo.worktype,
-    wo.clasificacion_operativa,
-    wo.numero_caso_fo AS numero_caso,
-    wo.eecc_cuadrilla_fo AS eecc,
-    wo.cant_worklogs
-FROM onms.work_orders wo
-WHERE wo.activa = true
-  AND wo.status = 'INPRG'
-  AND EXTRACT(EPOCH FROM (NOW() - wo.creation_date)) / 86400 > %(dias_minimos)s
-  {filtro_tecnicos}
-ORDER BY wo.creation_date ASC
-"""
-
-
-def construir_query(tecnicos_incluir, tecnicos_excluir):
-    """
-    Construye el query final inyectando el filtro de tecnicos segun corresponda.
-    Devuelve (sql, params).
-    """
-    params = {"dias_minimos": None}  # se llena despues
-    filtro = ""
-
-    if tecnicos_incluir:
-        filtro = "AND wo.assigned_to = ANY(%(tecnicos_incluir)s)"
-        params["tecnicos_incluir"] = tecnicos_incluir
-    elif tecnicos_excluir:
-        # IMPORTANTE: usar COALESCE para que las OTs sin tecnico (NULL) no
-        # se filtren accidentalmente, ya que NULL != ANY siempre da NULL.
-        filtro = "AND COALESCE(wo.assigned_to, '') <> ALL(%(tecnicos_excluir)s)"
-        params["tecnicos_excluir"] = tecnicos_excluir
-
-    return QUERY_BASE.format(filtro_tecnicos=filtro), params
-
-
-# Definicion de columnas de la hoja Candidatas
 COLUMNAS_CANDIDATAS = [
-    ("wonum",                    "WONUM",                    14),
-    ("dias_abierta",             "Dias Abierta",             12),
-    ("status",                   "Status",                   10),
-    ("worktype",                 "Worktype",                 10),
-    ("clasificacion_operativa",  "Clasificacion",            18),
-    ("tecnico",                  "Tecnico Asignado (lead)",  22),
-    ("fecha_creacion",           "Fecha Creacion",           18),
-    ("resumen",                  "Resumen",                  50),
-    ("coordinador",              "Coordinador",              22),
-    ("lider_zona",               "Lider Zona",               18),
-    ("codigo_sitio",             "Cod. Sitio",               12),
-    ("nombre_sitio",             "Nombre Sitio",             30),
-    ("eecc",                     "EECC",                     18),
-    ("numero_caso",              "Numero Caso",              16),
-    ("cinum",                    "CI",                       30),
-    ("ci_description",           "CI Descripcion",           40),
-    ("cant_worklogs",            "# Worklogs",               10),
+    ("wonum",            "WONUM",                 14),
+    ("dias_abierta",     "Dias Abierta",          12),
+    ("status",           "Status",                10),
+    ("worktype",         "Worktype",              10),
+    ("tipo_operacion",   "Tipo Operacion",        18),
+    ("tecnico",          "Tecnico (lead)",        22),
+    ("fecha_creacion",   "Fecha Creacion",        18),
+    ("resumen",          "Resumen",               50),
+    ("coordinador",      "Coordinador",           22),
+    ("lider_zona",       "Lider Zona",            18),
+    ("codigo_sitio",     "Cod. Sitio",            12),
+    ("nombre_sitio",     "Nombre Sitio",          30),
+    ("eecc",             "EECC",                  18),
+    ("numero_caso",      "Numero Caso",           16),
+    ("cinum",            "CI",                    30),
+    ("ci_description",   "CI Descripcion",        40),
 ]
 
-# Definicion de columnas de la hoja Resultado
 COLUMNAS_RESULTADO = [
     ("wonum",            "WONUM",                14),
     ("tecnico",          "Tecnico (lead)",       22),
@@ -204,9 +168,87 @@ THIN_BORDER = Border(
     bottom=Side(style="thin", color="CCCCCC"),
 )
 
-FILL_OK    = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")  # verde
-FILL_ERROR = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type="solid")  # rosa
-FILL_PARCIAL = PatternFill(start_color="FFE699", end_color="FFE699", fill_type="solid")  # amarillo
+FILL_OK      = PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid")
+FILL_ERROR   = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type="solid")
+FILL_PARCIAL = PatternFill(start_color="FFE699", end_color="FFE699", fill_type="solid")
+
+
+# ════════════════════════════════════════════════════════════════════
+# UTILIDADES
+# ════════════════════════════════════════════════════════════════════
+
+def _parse_fecha_maximo(s):
+    """
+    Maximo devuelve fechas en ISO con offset, ej: '2025-08-12T14:23:00-05:00'.
+    Devuelve SIEMPRE un datetime naive (sin tz) para poder restarlo con
+    datetime.now(). Para nuestro caso (diff en dias) el offset no afecta
+    porque tanto reportdate como now() estan en hora Colombia.
+    """
+    if not s:
+        return None
+    try:
+        # Cortar a 19 chars (YYYY-MM-DDTHH:MM:SS) elimina cualquier offset/tz
+        return datetime.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")
+    except Exception:
+        return None
+
+
+def _extraer_specs(detalle):
+    """
+    Recorre detalle['workorderspec'] y extrae los atributos definidos en
+    SPEC_ATTR_MAP. Devuelve dict {clave_salida: valor}.
+    Si una spec no aparece, su valor sera "".
+    """
+    out = {v: "" for v in SPEC_ATTR_MAP.values()}
+    specs = detalle.get("workorderspec") or []
+    for spec in specs:
+        attrid = spec.get("assetattrid")
+        if attrid in SPEC_ATTR_MAP:
+            # Maximo guarda el valor en alnvalue, numvalue o tablevalue segun el tipo.
+            # Para los campos que extraemos (todos texto) basta con alnvalue.
+            valor = spec.get("alnvalue") or spec.get("numvalue") or spec.get("tablevalue") or ""
+            out[SPEC_ATTR_MAP[attrid]] = valor
+    return out
+
+
+def _construir_candidata(member, dias_abierta, detalle=None, ci_cache=None):
+    """
+    Construye el dict de una candidata combinando los campos del listado
+    (member) con el enriquecimiento del detalle (si se proveyo).
+    """
+    candidata = {
+        "wonum":          member.get("wonum"),
+        "status":         member.get("status"),
+        "worktype":       member.get("worktype"),
+        "resumen":        (member.get("description") or "").strip(),
+        "codigo_sitio":   member.get("location"),
+        "nombre_sitio":   member.get("nom_ubicacion"),
+        "fecha_creacion": _parse_fecha_maximo(member.get("reportdate")),
+        "cinum":          member.get("cinum"),
+        "dias_abierta":   dias_abierta,
+        # Campos que solo salen del detalle:
+        "tecnico":        "",
+        "coordinador":    "",
+        "lider_zona":     "",
+        "eecc":           "",
+        "numero_caso":    "",
+        "tipo_operacion": "",
+        "ci_description": "",
+    }
+
+    if detalle is not None:
+        # lead es un campo top-level del workorder
+        candidata["tecnico"] = detalle.get("lead") or ""
+        # Specs
+        specs = _extraer_specs(detalle)
+        candidata.update(specs)
+        # CI description (top-level si viene; si no, consultamos)
+        candidata["ci_description"] = (
+            detalle.get("ci_description")
+            or (obtener_ci_description(candidata["cinum"], cache=ci_cache) if candidata["cinum"] else "")
+        )
+
+    return candidata
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -218,8 +260,6 @@ def cerrar_ot_dos_pasos(wonum, solo_comp=False):
     Lleva una OT de INPRG a CLOSE en dos PATCH:
         Paso 1: INPRG → COMP
         Paso 2: COMP → CLOSE  (omitido si solo_comp=True)
-
-    Retorna dict con resultado de ambos pasos.
     """
     resultado = {
         "wonum":          wonum,
@@ -300,7 +340,6 @@ def construir_hoja_candidatas(ws, filas):
 def construir_hoja_resultado(ws, resultados, solo_comp):
     aplicar_header(ws, COLUMNAS_RESULTADO)
     for row_idx, fila in enumerate(resultados, start=2):
-        # Fill segun resultado
         if solo_comp:
             ok = fila.get("paso_comp_ok")
         else:
@@ -351,13 +390,13 @@ def main():
         "--dias",
         type=int,
         default=DIAS_MINIMOS_DEFAULT,
-        help=f"Dias minimos de antiguedad (default {DIAS_MINIMOS_DEFAULT}).",
+        help=f"Dias minimos de antiguedad desde reportdate (default {DIAS_MINIMOS_DEFAULT}).",
     )
     parser.add_argument(
         "--tecnicos",
         nargs="+",
         default=None,
-        help="Restringir el universo a estos tecnicos. Si se omite, procesa TODOS.",
+        help="Restringir el universo a estos tecnicos (campo lead). Si se omite, procesa TODOS.",
     )
     parser.add_argument(
         "--excluir-tecnicos",
@@ -372,13 +411,23 @@ def main():
         default=None,
         help="Limite de OTs a procesar (util para pruebas controladas).",
     )
+    parser.add_argument(
+        "--sin-enriquecer",
+        action="store_true",
+        help="Salta la llamada a obtener_detalle_ot por OT. Mas rapido pero sin "
+             "coordinador, lider_zona, eecc, numero_caso, tipo_operacion ni lead.",
+    )
     args = parser.parse_args()
 
-    # Validacion: las dos flags de tecnicos son mutuamente excluyentes
     if args.tecnicos and args.excluir_tecnicos:
         parser.error("--tecnicos y --excluir-tecnicos son mutuamente excluyentes.")
 
-    # Resumen del filtro de tecnicos para imprimir
+    # Si se pidio filtro de tecnicos hay que enriquecer si o si (lead solo
+    # viene en el detalle, no en el listado paginado).
+    if (args.tecnicos or args.excluir_tecnicos) and args.sin_enriquecer:
+        parser.error("--tecnicos/--excluir-tecnicos requieren enriquecimiento; "
+                     "no se puede combinar con --sin-enriquecer.")
+
     if args.tecnicos:
         filtro_tec = f"SOLO {args.tecnicos}"
     elif args.excluir_tecnicos:
@@ -389,75 +438,119 @@ def main():
     print("=" * 75)
     print("CIERRE DE OTs INPRG ANTIGUAS")
     print("=" * 75)
-    print(f"  Modo:        {'EJECUCION REAL' if args.ejecutar else 'DRY-RUN (sin tocar Maximo)'}")
-    print(f"  Estado meta: {'COMP' if args.solo_comp else 'CLOSE'}")
-    print(f"  Dias min:    {args.dias}")
-    print(f"  Tecnicos:    {filtro_tec}")
-    print(f"  Limite:      {args.limit if args.limit else 'sin limite'}")
+    print(f"  Modo:             {'EJECUCION REAL' if args.ejecutar else 'DRY-RUN (sin tocar Maximo)'}")
+    print(f"  Estado meta:      {'COMP' if args.solo_comp else 'CLOSE'}")
+    print(f"  Dias min:         {args.dias} (desde reportdate)")
+    print(f"  Ownergroup:       {OWNERGROUP}")
+    print(f"  Classstructureid: {CLASSSTRUCTUREID}")
+    print(f"  Tecnicos:         {filtro_tec}")
+    print(f"  Enriquecimiento:  {'NO (sin specs)' if args.sin_enriquecer else 'SI (detalle por OT)'}")
+    print(f"  Limite:           {args.limit if args.limit else 'sin limite'}")
     print("=" * 75)
 
-    # 1. Conectar a Postgres y obtener candidatas
-    conn = obtener_conexion()
-    if conn is None:
-        print("[ERROR] No se pudo conectar a Postgres")
+    # ════════════════════════════════════════════════════════
+    # 1. LISTAR CANDIDATAS EN MAXIMO
+    # ════════════════════════════════════════════════════════
+    print("\n[1/4] Consultando OTs INPRG en Maximo (paginacion completa)...")
+
+    # Filtro: reportdate < (hoy - dias). Asi Maximo devuelve solo OTs
+    # con creacion mas antigua que el umbral.
+    fecha_corte = datetime.now() - timedelta(days=args.dias)
+
+    members = listar_ots(
+        ownergroup       = OWNERGROUP,
+        classstructureid = CLASSSTRUCTUREID,
+        status_in        = ["INPRG"],
+        fecha_hasta      = fecha_corte,   # reportdate < fecha_corte
+    )
+
+    if not members:
+        print("\n[INFO] No hay OTs candidatas. Nada que hacer.")
         return
 
-    try:
-        print("\n[1/3] Consultando candidatas en Postgres...")
+    print(f"      Total candidatas (pre-enriquecimiento): {len(members)}")
 
-        sql, params = construir_query(args.tecnicos, args.excluir_tecnicos)
-        params["dias_minimos"] = args.dias
+    # Cortar limite ANTES de enriquecer (para no llamar 26000 veces obtener_detalle_ot)
+    if args.limit:
+        members = members[: args.limit]
+        print(f"      Recortado a --limit={args.limit}")
 
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(sql, params)
-            candidatas = [dict(r) for r in cur.fetchall()]
+    # ════════════════════════════════════════════════════════
+    # 2. ENRIQUECER CON DETALLE (workorderspec, lead, ci_desc)
+    # ════════════════════════════════════════════════════════
+    ahora = datetime.now()
+    ci_cache = {}
+    candidatas = []
 
-        if args.limit:
-            candidatas = candidatas[: args.limit]
+    if args.sin_enriquecer:
+        print("\n[2/4] Saltando enriquecimiento (--sin-enriquecer)...")
+        for m in members:
+            f_creacion = _parse_fecha_maximo(m.get("reportdate"))
+            dias = (ahora - f_creacion).total_seconds() / 86400 if f_creacion else 0
+            candidatas.append(_construir_candidata(m, dias))
+    else:
+        print(f"\n[2/4] Enriqueciendo {len(members)} OTs con detalle (workorderspec)...")
+        for i, m in enumerate(members, 1):
+            wonum = m.get("wonum")
+            href  = m.get("href")
 
-        print(f"      Candidatas encontradas: {len(candidatas)}")
+            f_creacion = _parse_fecha_maximo(m.get("reportdate"))
+            dias = (ahora - f_creacion).total_seconds() / 86400 if f_creacion else 0
 
-        if not candidatas:
-            print("\n[INFO] No hay OTs candidatas. Nada que hacer.")
-            return
+            detalle = obtener_detalle_ot(href) if href else None
+            cand = _construir_candidata(m, dias, detalle=detalle, ci_cache=ci_cache)
+            candidatas.append(cand)
 
-        # Resumen rapido por tecnico
-        from collections import Counter
-        por_tecnico = Counter((c["tecnico"] or "(sin tecnico)") for c in candidatas)
-        print(f"      Distribucion por tecnico (top 15):")
-        for tec, cant in por_tecnico.most_common(15):
-            print(f"        {tec:<25} {cant:>5}")
-        if len(por_tecnico) > 15:
-            print(f"        ... y {len(por_tecnico) - 15} tecnicos mas")
+            if i % 25 == 0 or i == len(members):
+                print(f"      Enriquecidas: {i}/{len(members)}")
 
-    except Exception as e:
-        print(f"[ERROR] Consulta Postgres fallo: {e}")
-        import traceback; traceback.print_exc()
-        cerrar_conexion(conn)
+    # ════════════════════════════════════════════════════════
+    # 2.5 FILTRO POR TECNICO (post-enriquecimiento)
+    # ════════════════════════════════════════════════════════
+    if args.tecnicos:
+        tecnicos_set = set(args.tecnicos)
+        antes = len(candidatas)
+        candidatas = [c for c in candidatas if c.get("tecnico") in tecnicos_set]
+        print(f"      Filtro --tecnicos: {antes} → {len(candidatas)}")
+    elif args.excluir_tecnicos:
+        excluir_set = set(args.excluir_tecnicos)
+        antes = len(candidatas)
+        candidatas = [c for c in candidatas if c.get("tecnico") not in excluir_set]
+        print(f"      Filtro --excluir-tecnicos: {antes} → {len(candidatas)}")
+
+    if not candidatas:
+        print("\n[INFO] No hay OTs tras aplicar filtros. Nada que hacer.")
         return
 
-    finally:
-        cerrar_conexion(conn)
+    # Resumen por tecnico
+    por_tecnico = Counter((c.get("tecnico") or "(sin tecnico)") for c in candidatas)
+    print(f"      Distribucion por tecnico (top 15):")
+    for tec, cant in por_tecnico.most_common(15):
+        print(f"        {tec:<25} {cant:>5}")
+    if len(por_tecnico) > 15:
+        print(f"        ... y {len(por_tecnico) - 15} tecnicos mas")
 
-    # 2. Procesar (si --ejecutar)
+    # ════════════════════════════════════════════════════════
+    # 3. PROCESAR CIERRE (si --ejecutar)
+    # ════════════════════════════════════════════════════════
     resultados = []
     if args.ejecutar:
-        print(f"\n[2/3] Procesando {len(candidatas)} OTs en Maximo...")
+        print(f"\n[3/4] Procesando {len(candidatas)} OTs en Maximo...")
         print(f"      (pausa de {PAUSA_ENTRE_PATCH_SEG}s entre PATCH y {PAUSA_ENTRE_OTS_SEG}s entre OTs)")
 
         for i, c in enumerate(candidatas, 1):
             wonum   = c["wonum"]
-            tecnico = c["tecnico"]
+            tecnico = c.get("tecnico") or "(sin lead)"
             dias    = c["dias_abierta"]
 
-            print(f"  [{i}/{len(candidatas)}] OT {wonum} (tec={tecnico}, dias={float(dias):.1f}) ... ", end="", flush=True)
+            print(f"  [{i}/{len(candidatas)}] OT {wonum} (lead={tecnico}, dias={float(dias):.1f}) ... ",
+                  end="", flush=True)
 
             res = cerrar_ot_dos_pasos(wonum, solo_comp=args.solo_comp)
             res["tecnico"]      = tecnico
             res["dias_abierta"] = dias
             resultados.append(res)
 
-            # Estado de la linea
             if args.solo_comp:
                 if res["paso_comp_ok"]:
                     print(f"OK → {res['estado_final']}")
@@ -471,14 +564,15 @@ def main():
                 else:
                     print(f"FAIL ({res['paso_comp_msg']})")
 
-            # Pausa entre OTs
             if i < len(candidatas):
                 time.sleep(PAUSA_ENTRE_OTS_SEG)
     else:
-        print("\n[2/3] DRY-RUN: omitiendo ejecucion en Maximo.")
+        print("\n[3/4] DRY-RUN: omitiendo ejecucion en Maximo.")
 
-    # 3. Generar Excel
-    print(f"\n[3/3] Generando Excel...")
+    # ════════════════════════════════════════════════════════
+    # 4. GENERAR EXCEL
+    # ════════════════════════════════════════════════════════
+    print(f"\n[4/4] Generando Excel...")
     wb = Workbook()
 
     ws_cand = wb.active
@@ -501,7 +595,7 @@ def main():
     print(f"\n{'=' * 75}")
     print(f"RESUMEN")
     print(f"{'=' * 75}")
-    print(f"  Candidatas encontradas: {len(candidatas)}")
+    print(f"  Candidatas:             {len(candidatas)}")
     if resultados:
         ok_total = sum(
             1 for r in resultados

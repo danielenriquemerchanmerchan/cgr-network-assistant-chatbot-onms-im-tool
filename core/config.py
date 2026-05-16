@@ -119,6 +119,7 @@ ROSE_PASSWORD = os.getenv("ROSE_PASSWORD")
 
 DIAS_INPRG_RECIENTES   = 90  # Solo INPRG creadas en los ultimos N dias
 DIAS_RETENCION_CERRADAS = 14  # COMP/CLOSE/CAN se borran luego de N dias
+PROCESAR_CERRADAS = False
 
 
 # ═══════════════════════════════════════════════════════════════════

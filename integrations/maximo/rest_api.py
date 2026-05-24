@@ -31,6 +31,11 @@ from core.config import MAXIMO_PASSWORD as PASSWORD
 from core.config import MAXIMO_TIMEOUT as TIMEOUT
 from core.config import LOGOUT_URL
 
+from core.config import MAXIMO_INCIDENT_URL
+from core.config import MAXIMO_INCIDENT_USER
+from core.config import MAXIMO_INCIDENT_PASSWORD
+from core.config import MAXIMO_INCIDENT_SITEID
+
 # URL base para adjuntos (objeto restwoadj)
 ADJ_BASE = URL_BASE.replace("/RESTWO", "/restwoadj")
 
@@ -903,15 +908,505 @@ def extraer_worklogs_inline(detalle):
         o [] si la OT no tiene avances.
     """
     return detalle.get("worklog", []) or []
+
+
+# ══════════════════════════════════════════════════════════════
+# 11. RELACIONES ENTRE TICKETS (RESTINCIDENT / restincrel)
+# ══════════════════════════════════════════════════════════════
+#
+# Estas funciones operan sobre INCIDENTES (no sobre work orders).
+# El patron documentado por el manual MPR es:
+#   1) GET RESTINCIDENT?oslc.where=ticketid="..." -> obtener href
+#   2) Cambiar "restincident" por "restincrel" en el href
+#   3) POST con x-method-override: PATCH al href modificado
+#
+# Para vincular se envia spi:relatedrecord con los datos del ticket.
+# Para desvincular se agrega "_action": "Delete" al payload.
+#
+# Imports requeridos (ya presentes en el archivo):
+#   from core.config import (
+#       MAXIMO_INCIDENT_URL, MAXIMO_INCREL_URL,
+#       MAXIMO_INCIDENT_USER, MAXIMO_INCIDENT_PASSWORD,
+#       MAXIMO_INCIDENT_SITEID,
+#   )
+#
+# Si reutilizas MAXIMO_USER / MAXIMO_PASSWORD para los incidentes,
+# basta con sustituir las dos constantes en las llamadas de abajo.
+
+# Auth dedicada para el objeto incidente (puede coincidir con la
+# auth de OTs, pero el manual la documenta por separado).
+_AUTH_INC = HTTPBasicAuth(MAXIMO_INCIDENT_USER, MAXIMO_INCIDENT_PASSWORD)
+
+
+def _obtener_href_incidente(ticketid):
     """
-    Extrae los worklogs que vienen inline en el detalle de la OT
-    (clave 'worklog' como list). No hace requests adicionales.
+    Obtiene el href de un incidente a partir de su ticketid.
+    Funcion auxiliar interna, analoga a _obtener_href() pero contra
+    el objeto RESTINCIDENT.
 
     Parametros:
-        detalle (dict): response de obtener_detalle_ot()
+        ticketid (str): identificador del ticket. Ej: "6054120"
 
     Retorna:
-        list[dict] con los worklogs crudos tal como vienen de Maximo,
-        o [] si la OT no tiene avances.
+        (href, response) si se encontro el incidente, o (None, response)
+        si no existe o la consulta fallo.
+
+    El href devuelto apunta al objeto restincident; quien lo use
+    debe transformarlo a restincrel para operar relaciones.
     """
-    return detalle.get("worklog", []) or []
+    r = requests.get(
+        f"{MAXIMO_INCIDENT_URL}/?lean=1"
+        f"&oslc.where=ticketid=\"{ticketid}\""
+        f"&oslc.select=ticketid,href",
+        auth=_AUTH_INC,
+        timeout=TIMEOUT
+    )
+    if r.status_code != 200:
+        logging.error(f"Error HTTP {r.status_code} al obtener href de ticket {ticketid}")
+        return None, r
+    members = r.json().get("rdfs:member") or r.json().get("member")
+    if not members:
+        logging.warning(f"Ticket {ticketid} no encontrado")
+        return None, r
+    href = members[0].get("href", "")
+    return href or None, r
+
+
+# ══════════════════════════════════════════════════════════════
+# REEMPLAZAR la funcion vincular_ticket() existente en rest_api.py
+# con esta version.
+#
+# Cambio (descubierto via diagnostico):
+#   Para vincular un incidente con una OT (relatedrecclass=
+#   WORKORDER), Maximo exige el campo `relatedrecorgid` en el
+#   payload. El manual MPR solo cubria el caso INCIDENT->INCIDENT
+#   donde este campo no es necesario.
+#
+#   Solucion: agregar parametro opcional `relatedrecorgid` que se
+#   incluye en el payload solo cuando se proporciona (None = no enviar).
+#   Default razonable para nuestro entorno: "MOVISTAR".
+# ══════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════
+# REEMPLAZAR vincular_ticket() y desvincular_ticket() en
+# rest_api.py con estas versiones.
+#
+# HALLAZGOS ACUMULADOS:
+#   1. El endpoint correcto es el subrecurso del incidente:
+#      {href_incident}/relatedrecord
+#   2. Funciona para ambos casos: INCIDENT y WORKORDER.
+#   3. Para WORKORDER, agregar spi:relatedrecorgid.
+#   4. (NUEVO) Para CREAR (vincular), usar POST limpio sin los
+#      headers x-method-override/patchtype. Esos headers son
+#      para UPDATE sobre un recurso ya existente, no para crear
+#      uno nuevo en una coleccion.
+#   5. Para ELIMINAR (desvincular), si se necesitan los headers
+#      de PATCH porque es una modificacion sobre la coleccion.
+# ══════════════════════════════════════════════════════════════
+
+
+# ══════════════════════════════════════════════════════════════
+# REEMPLAZAR vincular_ticket() y desvincular_ticket() en
+# rest_api.py por estas versiones.
+#
+# REVERSION + CONSOLIDACION:
+#   - Volver al endpoint correcto: restincrel (el del manual MPR).
+#   - Mantener el parametro relatedrecorgid (necesario para OT).
+#   - El "fix" del subrecurso /relatedrecord fue un error: ese
+#     subrecurso NO crea relaciones, crea SUB-INCIDENTES (descubierto
+#     por POST que devolvio HTTP 201 con un spi:ticketid nuevo).
+#
+#   El caso INCIDENT->WORKORDER sigue fallando con HTTP 400
+#   "No es un ticket valido" por una razon que aun NO sabemos. Hay
+#   que seguir diagnosticando. Posibles hipotesis pendientes:
+#     - Maximo en este entorno bloquea la creacion de relaciones
+#       INCIDENT->WORKORDER via API y solo permite hacerlo desde
+#       la UI (la relacion existente 6054120->7708638 puede
+#       haberse creado manualmente por la UI).
+#     - Hay un campo adicional especifico para WORKORDER que aun
+#       no hemos identificado.
+#     - El endpoint correcto para WORKORDER es distinto al
+#       restincrel; posiblemente no este expuesto via OSLC en este
+#       entorno y solo se acceda via UI.
+# ══════════════════════════════════════════════════════════════
+
+
+def vincular_ticket(ticketid_origen, ticketid_relacionado,
+                    relatetype="RELATED",
+                    relatedrecclass="INCIDENT",
+                    siteid=None,
+                    relatedrecorgid=None,
+                    isglobal=True,
+                    notificar=False,
+                    notifica_interesados=False,
+                    aprobcomite=False,
+                    presentacomite=False):
+    """
+    Vincula un incidente con otro registro en Maximo.
+
+    Endpoint (del manual MPR):
+        POST {href_incident_modificado}  donde el href se obtiene
+        cambiando "restincident" por "restincrel".
+
+    Headers: x-method-override=PATCH, patchtype=MERGE
+
+    NOTA IMPORTANTE: El caso INCIDENT->WORKORDER aun no esta
+    100% validado contra esta API. Maximo rechaza con HTTP 400
+    "No es un ticket valido" pese a que la UI permite crear esa
+    misma relacion. Se sospecha que la API restincrel solo soporta
+    INCIDENT<->INCIDENT en este entorno.
+
+    Parametros: (ver firma)
+    Retorna dict: {success, message, status, ticket, ticket_relacionado}
+    """
+    site = siteid or MAXIMO_INCIDENT_SITEID
+
+    if relatedrecclass.upper() == "WORKORDER" and relatedrecorgid is None:
+        relatedrecorgid = "MOVISTAR"
+
+    r1 = None
+    r2 = None
+    try:
+        # Paso 1+2: href incidente y transformar restincident -> restincrel
+        href_inc, r1 = _obtener_href_incidente(ticketid_origen)
+        if not href_inc:
+            return {
+                "success": False,
+                "message": f"Ticket origen {ticketid_origen} no encontrado",
+                "status": "not_found",
+                "ticket": ticketid_origen,
+                "ticket_relacionado": ticketid_relacionado,
+            }
+
+        href_rel = href_inc.replace("/restincident/", "/restincrel/")
+
+        item_rel = {
+            "spi:relatedreckey":        ticketid_relacionado,
+            "spi:relatetype":           relatetype,
+            "spi:relatedrecclass":      relatedrecclass,
+            "spi:notificar":            notificar,
+            "spi:recordkey":            ticketid_origen,
+            "spi:notifica_interesados": notifica_interesados,
+            "spi:aprobcomite":          aprobcomite,
+            "spi:presentacomite":       presentacomite,
+            "spi:siteid":               site,
+            "spi:relatedrecsiteid":     site,
+        }
+        if relatedrecorgid:
+            item_rel["spi:relatedrecorgid"] = relatedrecorgid
+
+        # Paso 3: POST con override PATCH (como en el manual MPR)
+        r2 = requests.post(
+            href_rel,
+            auth=_AUTH_INC,
+            headers={
+                "x-method-override": "PATCH",
+                "patchtype":         "MERGE",
+                "properties":        "*",
+                "Content-Type":      "application/json"
+            },
+            json={
+                "spi:isglobal":      isglobal,
+                "spi:relatedrecord": [item_rel],
+            },
+            timeout=TIMEOUT
+        )
+
+        if r2.status_code in (200, 201, 204):
+            logging.info(
+                f"Ticket {ticketid_origen} vinculado con {ticketid_relacionado} "
+                f"({relatetype} / {relatedrecclass})"
+            )
+            return {
+                "success": True,
+                "message": "Tickets vinculados correctamente",
+                "status": "success",
+                "ticket": ticketid_origen,
+                "ticket_relacionado": ticketid_relacionado,
+            }
+        else:
+            logging.error(
+                f"Error vinculando tickets HTTP {r2.status_code}: {r2.text[:500]}"
+            )
+            return {
+                "success": False,
+                "message": f"Error HTTP {r2.status_code}",
+                "status": "patch_error",
+                "ticket": ticketid_origen,
+                "ticket_relacionado": ticketid_relacionado,
+            }
+
+    except Exception as e:
+        logging.error(
+            f"Error vinculando ticket {ticketid_origen} con {ticketid_relacionado}: {e}"
+        )
+        return {
+            "success": False,
+            "message": str(e),
+            "status": "exception",
+            "ticket": ticketid_origen,
+            "ticket_relacionado": ticketid_relacionado,
+        }
+
+    finally:
+        if r1 is not None:
+            _cerrar_sesion(r1)
+        if r2 is not None:
+            _cerrar_sesion(r2)
+
+
+def desvincular_ticket(ticketid_origen, ticketid_relacionado,
+                       relatetype="RELATED",
+                       relatedrecclass="INCIDENT",
+                       siteid=None,
+                       relatedrecorgid=None):
+    """
+    Elimina una relacion existente entre un incidente y otro registro.
+
+    Endpoint: POST {href_modificado_restincrel} con "_action": "Delete"
+
+    NOTA: Sobre incidentes en estado CLOSED, Maximo acepta el POST
+    con HTTP 200 pero NO aplica el cambio (silent fail). El estado
+    del incidente debe verificarse externamente antes de llamar.
+
+    Parametros: (ver firma)
+    Retorna dict: {success, message, status, ticket, ticket_relacionado}
+    """
+    site = siteid or MAXIMO_INCIDENT_SITEID
+
+    if relatedrecclass.upper() == "WORKORDER" and relatedrecorgid is None:
+        relatedrecorgid = "MOVISTAR"
+
+    r1 = None
+    r2 = None
+    try:
+        href_inc, r1 = _obtener_href_incidente(ticketid_origen)
+        if not href_inc:
+            return {
+                "success": False,
+                "message": f"Ticket origen {ticketid_origen} no encontrado",
+                "status": "not_found",
+                "ticket": ticketid_origen,
+                "ticket_relacionado": ticketid_relacionado,
+            }
+
+        href_rel = href_inc.replace("/restincident/", "/restincrel/")
+
+        item_rel = {
+            "spi:recordkey":        ticketid_origen,
+            "spi:class":            "INCIDENT",
+            "spi:relatedreckey":    ticketid_relacionado,
+            "spi:relatetype":       relatetype,
+            "spi:relatedrecclass":  relatedrecclass,
+            "spi:siteid":           site,
+            "spi:relatedrecsiteid": site,
+            "_action":              "Delete",
+        }
+        if relatedrecorgid:
+            item_rel["spi:relatedrecorgid"] = relatedrecorgid
+
+        r2 = requests.post(
+            href_rel,
+            auth=_AUTH_INC,
+            headers={
+                "x-method-override": "PATCH",
+                "patchtype":         "MERGE",
+                "properties":        "*",
+                "Content-Type":      "application/json"
+            },
+            json={"spi:relatedrecord": [item_rel]},
+            timeout=TIMEOUT
+        )
+
+        if r2.status_code in (200, 201, 204):
+            logging.info(
+                f"Relacion entre {ticketid_origen} y {ticketid_relacionado} eliminada "
+                f"({relatetype} / {relatedrecclass})"
+            )
+            return {
+                "success": True,
+                "message": "Relacion eliminada correctamente",
+                "status": "success",
+                "ticket": ticketid_origen,
+                "ticket_relacionado": ticketid_relacionado,
+            }
+        else:
+            logging.error(
+                f"Error desvinculando tickets HTTP {r2.status_code}: {r2.text[:500]}"
+            )
+            return {
+                "success": False,
+                "message": f"Error HTTP {r2.status_code}",
+                "status": "patch_error",
+                "ticket": ticketid_origen,
+                "ticket_relacionado": ticketid_relacionado,
+            }
+
+    except Exception as e:
+        logging.error(
+            f"Error desvinculando ticket {ticketid_origen} de {ticketid_relacionado}: {e}"
+        )
+        return {
+            "success": False,
+            "message": str(e),
+            "status": "exception",
+            "ticket": ticketid_origen,
+            "ticket_relacionado": ticketid_relacionado,
+        }
+
+    finally:
+        if r1 is not None:
+            _cerrar_sesion(r1)
+        if r2 is not None:
+            _cerrar_sesion(r2)
+
+
+def listar_tickets_relacionados(ticketid, solo_clase=None):
+    """
+    Lista los registros relacionados con un ticket (incidente) en Maximo.
+
+    Maximo expone las relaciones como un subrecurso del incidente:
+        GET {href_incident}/relatedrecord
+
+    En la misma coleccion vienen mezcladas:
+        - Relaciones a otros incidentes (relatedrecclass="INCIDENT")
+        - Relaciones a ordenes de trabajo (relatedrecclass="WORKORDER")
+
+    Por defecto se devuelven TODAS. Para filtrar pasar `solo_clase`.
+
+    Parametros:
+        ticketid    (str): identificador del ticket origen
+        solo_clase  (str|None): si se pasa, solo retorna los miembros
+                                cuyo relatedrecclass coincida (case insensitive).
+                                Valores comunes: "INCIDENT", "WORKORDER".
+                                None (default) = sin filtro.
+
+    Retorna dict:
+        {
+            success: bool,
+            message: str,
+            status:  str,
+            ticket:  str,
+            relacionados: [
+                {
+                    "relatedreckey":   "6054118",   # ticket o wonum relacionado
+                    "relatetype":      "RELATED",    # o "FOLLOWUP", etc.
+                    "relatedrecclass": "INCIDENT",   # o "WORKORDER"
+                    "recordkey":       "6054120",   # ticket origen
+                    "siteid":          "REDES",
+                    "orgid":           "MOVISTAR",
+                    "relatedrecordid": 2451621,     # id interno de la relacion
+                    "notificar":       false,
+                    "presentacomite":  false,
+                    "aprobcomite":     false,
+                    "notifica_interesados": false,
+                    "href":            "...",       # href del registro de relacion
+                    ...
+                },
+                ...
+            ]
+        }
+
+    Ejemplo de uso:
+        # Todas las relaciones
+        info = listar_tickets_relacionados("6054120")
+
+        # Solo tickets relacionados (excluye OTs)
+        info = listar_tickets_relacionados("6054120", solo_clase="INCIDENT")
+
+        # Solo OTs relacionadas
+        info = listar_tickets_relacionados("6054120", solo_clase="WORKORDER")
+    """
+    r1 = None
+    r2 = None
+    try:
+        # Paso 1: obtener href del incidente
+        r1 = requests.get(
+            f"{MAXIMO_INCIDENT_URL}/?lean=1"
+            f"&oslc.where=ticketid=\"{ticketid}\""
+            f"&oslc.select=ticketid,href",
+            auth=_AUTH_INC,
+            timeout=TIMEOUT
+        )
+        if r1.status_code != 200:
+            return {
+                "success": False,
+                "message": f"Error HTTP {r1.status_code}",
+                "status": "http_error",
+                "ticket": ticketid,
+                "relacionados": [],
+            }
+
+        members = r1.json().get("rdfs:member") or r1.json().get("member")
+        if not members:
+            return {
+                "success": False,
+                "message": "Ticket no encontrado",
+                "status": "not_found",
+                "ticket": ticketid,
+                "relacionados": [],
+            }
+
+        href = members[0].get("href", "")
+        if not href:
+            return {
+                "success": False,
+                "message": "Sin href",
+                "status": "no_href",
+                "ticket": ticketid,
+                "relacionados": [],
+            }
+
+        # Paso 2: GET al subrecurso /relatedrecord
+        r2 = requests.get(
+            f"{href}/relatedrecord",
+            params={"lean": "1", "oslc.select": "*"},
+            auth=_AUTH_INC,
+            timeout=TIMEOUT
+        )
+        if r2.status_code != 200:
+            return {
+                "success": False,
+                "message": f"Error HTTP {r2.status_code} en /relatedrecord",
+                "status": "http_error",
+                "ticket": ticketid,
+                "relacionados": [],
+            }
+
+        data = r2.json()
+        miembros = data.get("rdfs:member") or data.get("member") or []
+
+        # Filtro opcional por clase
+        if solo_clase:
+            clase_norm = solo_clase.upper()
+            miembros = [
+                m for m in miembros
+                if (m.get("relatedrecclass") or "").upper() == clase_norm
+            ]
+
+        # Las claves ya vienen sin prefijo "spi:" en este endpoint
+        relacionados = list(miembros)
+
+        return {
+            "success": True,
+            "message": f"{len(relacionados)} relacion(es) encontrada(s)",
+            "status": "success",
+            "ticket": ticketid,
+            "relacionados": relacionados,
+        }
+
+    except Exception as e:
+        logging.error(f"Error listando relaciones de ticket {ticketid}: {e}")
+        return {
+            "success": False,
+            "message": str(e),
+            "status": "exception",
+            "ticket": ticketid,
+            "relacionados": [],
+        }
+
+    finally:
+        if r1 is not None:
+            _cerrar_sesion(r1)
+        if r2 is not None:
+            _cerrar_sesion(r2)

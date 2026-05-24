@@ -226,3 +226,37 @@ MAXIMO_CLASIFICACIONES = {
 # Requisito si esta en True: el bot debe ser admin con permiso
 # "Pin messages" en cada grupo de cuadrilla.
 PINEAR_OT_ACTIVA = True
+
+
+# ══════════════════════════════════════════════════════════════
+# Maximo - API REST de Incidentes / Tickets relacionados
+# ══════════════════════════════════════════════════════════════
+#
+# Objeto OSLC para consultar incidentes y obtener su href:
+#     GET .../maximo/oslc/os/RESTINCIDENT/?oslc.where=ticketid="..."
+#
+# Una vez obtenido el href del incidente, se reemplaza "restincident"
+# por "restincrel" para operar sobre los tickets relacionados:
+#     POST .../maximo/oslc/os/restincrel/{id}
+#
+# Segun manual: API Rest Tickets Relacionados - Grupo MPR
+# ──────────────────────────────────────────────────────────────
+ 
+# URL del objeto RESTINCIDENT (consulta de incidentes por ticketid).
+# Equivalente conceptual a MAXIMO_URL pero para incidentes.
+MAXIMO_INCIDENT_URL = "http://10.80.123.13:8001/maximo/oslc/os/RESTINCIDENT"
+ 
+# URL del objeto restincrel (relaciones entre tickets).
+# El href obtenido desde MAXIMO_INCIDENT_URL se transforma cambiando
+# "restincident" -> "restincrel" antes de hacer POST.
+MAXIMO_INCREL_URL = "http://10.80.123.13:8001/maximo/oslc/os/restincrel"
+ 
+# Credenciales del usuario REST documentadas en el manual.
+# Si ya existen MAXIMO_USER / MAXIMO_PASSWORD y son los mismos
+# (restusr / restusr2023), se pueden reutilizar y omitir estas dos.
+MAXIMO_INCIDENT_USER     = "restusr"
+MAXIMO_INCIDENT_PASSWORD = "restusr2023"
+ 
+# SiteID por defecto para operaciones sobre incidentes de red.
+# El manual usa "REDES" en todos los ejemplos.
+MAXIMO_INCIDENT_SITEID = "REDES"

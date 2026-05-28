@@ -117,7 +117,7 @@ ROSE_PASSWORD = os.getenv("ROSE_PASSWORD")
 # dentro de la ventana definida abajo. Las que quedan fuera de ventana
 # se eliminan fisicamente de la BD.
 
-DIAS_INPRG_RECIENTES   = 90  # Solo INPRG creadas en los ultimos N dias
+DIAS_INPRG_RECIENTES   = 14  # Solo INPRG creadas en los ultimos N dias
 DIAS_RETENCION_CERRADAS = 14  # COMP/CLOSE/CAN se borran luego de N dias
 PROCESAR_CERRADAS = False
 
@@ -229,34 +229,14 @@ PINEAR_OT_ACTIVA = True
 
 
 # ══════════════════════════════════════════════════════════════
-# Maximo - API REST de Incidentes / Tickets relacionados
+# MAXIMO INCIDENT API (restincident / restincrel)
 # ══════════════════════════════════════════════════════════════
-#
-# Objeto OSLC para consultar incidentes y obtener su href:
-#     GET .../maximo/oslc/os/RESTINCIDENT/?oslc.where=ticketid="..."
-#
-# Una vez obtenido el href del incidente, se reemplaza "restincident"
-# por "restincrel" para operar sobre los tickets relacionados:
-#     POST .../maximo/oslc/os/restincrel/{id}
-#
-# Segun manual: API Rest Tickets Relacionados - Grupo MPR
-# ──────────────────────────────────────────────────────────────
- 
-# URL del objeto RESTINCIDENT (consulta de incidentes por ticketid).
-# Equivalente conceptual a MAXIMO_URL pero para incidentes.
-MAXIMO_INCIDENT_URL = "http://10.80.123.13:8001/maximo/oslc/os/RESTINCIDENT"
- 
-# URL del objeto restincrel (relaciones entre tickets).
-# El href obtenido desde MAXIMO_INCIDENT_URL se transforma cambiando
-# "restincident" -> "restincrel" antes de hacer POST.
-MAXIMO_INCREL_URL = "http://10.80.123.13:8001/maximo/oslc/os/restincrel"
- 
-# Credenciales del usuario REST documentadas en el manual.
-# Si ya existen MAXIMO_USER / MAXIMO_PASSWORD y son los mismos
-# (restusr / restusr2023), se pueden reutilizar y omitir estas dos.
-MAXIMO_INCIDENT_USER     = "restusr"
-MAXIMO_INCIDENT_PASSWORD = "restusr2023"
- 
-# SiteID por defecto para operaciones sobre incidentes de red.
-# El manual usa "REDES" en todos los ejemplos.
-MAXIMO_INCIDENT_SITEID = "REDES"
+# Endpoint y credenciales para el modulo de incidentes (tickets) de
+# Maximo. Es un objeto REST distinto a RESTWO (work orders), por eso
+# tiene su propia URL base y eventualmente puede tener credenciales
+# distintas si el usuario funcional de tickets no es el mismo de OTs.
+
+MAXIMO_INCIDENT_URL      = os.getenv("MAXIMO_INCIDENT_URL")
+MAXIMO_INCIDENT_USER     = os.getenv("MAXIMO_INCIDENT_USER", MAXIMO_USER)
+MAXIMO_INCIDENT_PASSWORD = os.getenv("MAXIMO_INCIDENT_PASSWORD", MAXIMO_PASSWORD)
+MAXIMO_INCIDENT_SITEID   = os.getenv("MAXIMO_INCIDENT_SITEID", "REDES")

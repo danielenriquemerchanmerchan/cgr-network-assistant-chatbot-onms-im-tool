@@ -79,6 +79,7 @@ from integrations.maximo.rest_api import (
     obtener_detalle_ot,
     obtener_ci_description,
     extraer_worklogs_inline,
+    log_diagnostico_sesiones,
 )
 from integrations.maximo.oracle import (
     cargar_cache_sitios,
@@ -110,7 +111,7 @@ WORKTYPE = "MC"
 
 # Workers para la fase de descarga paralela contra Maximo.
 # 8 da speedup ~8.0x sobre el equivalente secuencial.
-MAX_WORKERS_MAXIMO = 8
+MAX_WORKERS_MAXIMO = 1
 
 # Cada cuantas OTs procesadas hacer commit a Postgres.
 COMMIT_CADA = 50
@@ -665,6 +666,12 @@ def sincronizar_bandeja():
                      f"| max {t_pg_max*1000:.0f}ms ({wonum_pg_max})")
         logging.info(f"    Postgres (commits):       {t_commit_total:.1f}s")
         logging.info("=" * 60)
+
+        # ───────────────────────────────────────────────────────────
+        # 8. Diagnostico de sesiones Maximo (TEMPORAL - quitar cuando
+        # se valide que el fix de _cerrar_sesion funciona).
+        # ───────────────────────────────────────────────────────────
+        log_diagnostico_sesiones(reset=True)
 
         return True
 

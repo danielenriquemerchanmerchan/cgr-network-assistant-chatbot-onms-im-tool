@@ -1410,3 +1410,134 @@ def listar_tickets_relacionados(ticketid, solo_clase=None):
             _cerrar_sesion(r1)
         if r2 is not None:
             _cerrar_sesion(r2)
+            
+            
+# ══════════════════════════════════════════════════════════════
+# 12. CREAR INCIDENTE (+ OT automatica)
+# ══════════════════════════════════════════════════════════════
+#
+# Un unico POST a RESTINCIDENT crea el incidente Y, por configuracion
+# del lado de Maximo (createwomulti / classstructureid), genera
+# automaticamente la OT asociada en la misma ejecucion.
+#
+# Nosotros solo enviamos el JSON del incidente; Maximo se encarga
+# de crear la OT vinculada.
+#
+# Endpoint: POST http://.../maximo/oslc/os/RESTINCIDENT?lean=1
+# Auth:     restusr / restusr2023 (la misma _AUTH_INC)
+#
+# Segun instructivo de creacion de incidentes (Centro Gestion).
+
+def crear_incidente_con_ot(datos):
+    """
+    Crea un incidente en Maximo (objeto RESTINCIDENT). Por configuracion
+    del sistema, este POST genera ademas la OT asociada automaticamente.
+
+    Parametros:
+        datos (dict): campos del incidente a crear. Campos tipicos
+                      (segun instructivo Centro Gestion):
+            affecteddate                -> fecha de afectacion (ISO)
+            creationdate                -> fecha de creacion (ISO)
+            description                 -> titulo del incidente
+            reportedby                  -> quien reporta. Ej: "CENTROGESTION"
+            assetsiteid                 -> site del activo. Ej: "REDES"
+            assetorgid                  -> org del activo. Ej: "MOVISTAR"
+            externalsystem              -> sistema externo. Ej: "TT_API_CG"
+            severidad                   -> severidad (int). Ej: 3
+            impact                      -> impacto (int). Ej: 4
+            cinum                       -> CI principal. Ej: "GB0093"
+            description_longdescription -> descripcion larga
+            severidad_description       -> texto severidad. Ej: "MINOR"
+            ownergroup                  -> grupo responsable. Ej: "O_GESRED"
+            affectedstart               -> inicio de afectacion (ISO)
+            classificationid            -> clasificacion. Ej: "40.05"
+            classstructureid            -> estructura de clasif. Ej: "1887"
+            multiassetlocci             -> objeto/lista de elementos de red
+                                           afectados
+
+    Retorna:
+        dict con: success, message, status, ticket (ticketid creado),
+                  wonum (OT generada, si Maximo la devuelve), href, raw
+
+    Ejemplo de uso:
+        datos = {
+            "description": "Prueba incidente",
+            "reportedby": "CENTROGESTION",
+            "assetsiteid": "REDES",
+            "assetorgid": "MOVISTAR",
+            ...
+        }
+        resultado = crear_incidente(datos)
+        if resultado["success"]:
+            print(f"Incidente {resultado['ticket']} creado")
+    """
+    r = None
+    try:
+        r = requests.post(
+            f"{MAXIMO_INCIDENT_URL}?lean=1",
+            auth=_AUTH_INC,
+            headers={
+                "Content-Type": "application/json",
+                "properties":   "*",
+            },
+            json=datos,
+            timeout=TIMEOUT
+        )
+
+        if r.status_code in (200, 201):
+            data = r.json()
+            # Las claves del response vienen con prefijo "spi:"
+            ticketid = data.get("spi:ticketid") or data.get("ticketid", "")
+            href     = r.headers.get("Location", "")
+
+            # Maximo puede o no devolver el wonum de la OT generada en
+            # el response inmediato. Lo intentamos extraer; si no esta,
+            # quedara como "" y se consultara aparte.
+            wonum = (
+                data.get("spi:wonum")
+                or data.get("wonum")
+                or ""
+            )
+
+            logging.info(
+                f"Incidente creado: ticketid={ticketid}"
+                + (f", OT={wonum}" if wonum else " (OT generada por Maximo)")
+            )
+            return {
+                "success": True,
+                "message": f"Incidente {ticketid} creado correctamente",
+                "status":  "success",
+                "ticket":  ticketid,
+                "wonum":   wonum,
+                "href":    href,
+                "raw":     data,
+            }
+        else:
+            logging.error(
+                f"Error creando incidente HTTP {r.status_code}: {r.text[:500]}"
+            )
+            return {
+                "success": False,
+                "message": f"Error HTTP {r.status_code}",
+                "status":  "http_error",
+                "ticket":  None,
+                "wonum":   None,
+                "href":    "",
+                "raw":     None,
+            }
+
+    except Exception as e:
+        logging.error(f"Error creando incidente: {e}")
+        return {
+            "success": False,
+            "message": str(e),
+            "status":  "exception",
+            "ticket":  None,
+            "wonum":   None,
+            "href":    "",
+            "raw":     None,
+        }
+
+    finally:
+        if r is not None:
+            _cerrar_sesion(r)

@@ -22,6 +22,11 @@ EJECUCION:
 
 ADVERTENCIA:
     Si el .env apunta a 10.80.123.11 (PROD), el script aborta.
+
+PLACEHOLDERS QUE SE REEMPLAZAN EN RUNTIME:
+    [TIMESTAMP] -> hora legible (para la description). Ej: "2026-05-28 09:27:31"
+    [NOW_ISO]   -> hora ISO 8601 con zona (-05:00) para campos de fecha
+                   como schedstart / actstart. Ej: "2026-05-28T09:27:31-05:00"
 """
 
 import core.logging_setup  # noqa: F401 — inicializa logging del proyecto
@@ -36,6 +41,30 @@ from tests.integracion_maximo._comun import (
 )
 
 
+def _reemplazar_placeholders(payload):
+    """
+    Reemplaza los placeholders de fecha/hora en TODOS los valores
+    string del payload:
+        [TIMESTAMP] -> hora legible "YYYY-MM-DD HH:MM:SS"
+        [NOW_ISO]   -> hora ISO 8601 con zona "YYYY-MM-DDTHH:MM:SS-05:00"
+
+    Ambos usan el MISMO instante (datetime.now()) para que la OT quede
+    coherente: la description, schedstart y actstart reflejan la misma
+    hora de creacion.
+    """
+    ahora      = datetime.now()
+    ts_legible = ahora.strftime("%Y-%m-%d %H:%M:%S")
+    ts_iso     = ahora.strftime("%Y-%m-%dT%H:%M:%S-05:00")
+
+    resultado = {}
+    for k, v in payload.items():
+        if isinstance(v, str):
+            v = v.replace("[TIMESTAMP]", ts_legible)
+            v = v.replace("[NOW_ISO]", ts_iso)
+        resultado[k] = v
+    return resultado
+
+
 def main():
     print("=" * 70)
     print("PRUEBA 01: CREAR OT MINIMA (solo top-level)")
@@ -47,10 +76,9 @@ def main():
     # 2. Cargar payload base
     payload = cargar_payload("crear_ot_minima.json")
 
-    # 3. Reemplazar [TIMESTAMP] por la hora actual para que cada corrida
-    #    produzca una description unica y sea facil ubicarla en Maximo UI
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    payload["description"] = payload["description"].replace("[TIMESTAMP]", timestamp)
+    # 3. Reemplazar placeholders de fecha/hora (description, schedstart, actstart)
+    #    Todos usan el mismo instante de creacion.
+    payload = _reemplazar_placeholders(payload)
 
     print("Payload a enviar:")
     for k, v in payload.items():

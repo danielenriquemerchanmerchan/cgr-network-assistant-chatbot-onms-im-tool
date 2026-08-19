@@ -16,12 +16,18 @@ Cierre de sesion:
     Cada llamada REST abre una sesion. La funcion _cerrar_sesion()
     la cierra automaticamente usando las cookies del response
     (LtpaToken2 + JSESSIONID) segun el manual Rest_Cierre_Sesion_v1.
+
+Diagnostico:
+    log_diagnostico_sesiones(reset=False) -> dict
+    Reporta cuantos cierres se intentaron y cuantos quedaron sin
+    confirmar. Los contadores son thread-safe (el ETL usa hilos).
 """
 
 import requests
 from requests.auth import HTTPBasicAuth
 from datetime import datetime
 import logging
+import threading
 
 from core.config import MAXIMO_CI_URL as URL_CI
 from core.config import MAXIMO_PAGE_SIZE as PAGE_SIZE_DEFAULT
@@ -44,26 +50,106 @@ ADJ_BASE = URL_BASE.replace("/RESTWO", "/restwoadj")
 # FUNCION INTERNA: cierre de sesion
 # ══════════════════════════════════════════════════════════════
 
+# Contadores de diagnostico de sesiones.
+# El ETL descarga detalles con ThreadPoolExecutor, asi que varios hilos
+# llaman a _cerrar_sesion() al mismo tiempo. "d[k] += 1" NO es atomico en
+# Python (es LOAD / ADD / STORE y el GIL puede cortar entre medias), por
+# eso todo incremento va bajo lock.
+_DIAG_LOCK = threading.Lock()
+_DIAG_SESIONES = {
+    "intentos":    0,  # veces que se llamo a _cerrar_sesion()
+    "cerradas":    0,  # el logout respondio < 400
+    "sin_cookies": 0,  # response sin cookies -> no se pudo cerrar
+    "logout_http": 0,  # el logout respondio >= 400
+    "errores":     0,  # excepcion durante el cierre
+}
+
+
+def _diag(clave):
+    """Incrementa un contador de diagnostico de forma thread-safe."""
+    with _DIAG_LOCK:
+        _DIAG_SESIONES[clave] += 1
+
+
 def _cerrar_sesion(response):
     """
     Cierra la sesion REST de Maximo usando las cookies del response.
     Segun manual Rest_Cierre_Sesion_v1: GET /maximo/oslc/logout
     con header Cookie: LtpaToken2=...;JSESSIONID=...
+
+    Nota: el logout NO lleva auth basica a proposito. Las cookies ya
+    autentican la peticion, y mandar HTTPBasicAuth hace que Maximo abra
+    una sesion nueva para atender el propio logout (se cierra una y se
+    abre otra). Si en tu entorno el logout empieza a devolver 401,
+    revierte esta linea y el contador "logout_http" lo delatara.
     """
+    _diag("intentos")
     try:
         cookies = response.cookies.get_dict()
         if not cookies:
+            _diag("sin_cookies")
+            logging.debug("Response sin cookies: no hay sesion que cerrar")
             return
         cookie_header = "; ".join([f"{k}={v}" for k, v in cookies.items()])
-        requests.get(
+        r_logout = requests.get(
             LOGOUT_URL,
-            auth=HTTPBasicAuth(USERNAME, PASSWORD),
             headers={"Cookie": cookie_header},
             timeout=TIMEOUT
         )
-        logging.debug("Sesion Maximo cerrada")
+        if r_logout.status_code < 400:
+            _diag("cerradas")
+            logging.debug("Sesion Maximo cerrada")
+        else:
+            _diag("logout_http")
+            logging.warning(
+                f"Logout Maximo respondio HTTP {r_logout.status_code}"
+            )
     except Exception as e:
+        _diag("errores")
         logging.warning(f"Error cerrando sesion Maximo: {e}")
+
+
+def log_diagnostico_sesiones(reset=False):
+    """
+    Escribe en el log el balance de cierres de sesion REST acumulado
+    y lo retorna como dict.
+
+    Parametros:
+        reset (bool): si es True, pone los contadores a cero despues de
+                      reportar. Usar al FINAL de cada corrida del ETL
+                      para que la siguiente arranque limpia.
+
+    Retorna:
+        dict con el snapshot ANTES del reset:
+        {intentos, cerradas, sin_cookies, logout_http, errores}
+
+    Interpretacion:
+        cerradas == intentos            -> todo cerro bien
+        sin_cookies alto                -> Maximo no esta devolviendo
+                                           cookies; revisar si realmente
+                                           se abre sesion en esas llamadas
+        logout_http / errores > 0       -> sesiones potencialmente
+                                           huerfanas en el servidor
+    """
+    with _DIAG_LOCK:
+        snap = dict(_DIAG_SESIONES)
+        if reset:
+            for k in _DIAG_SESIONES:
+                _DIAG_SESIONES[k] = 0
+
+    huerfanas = snap["sin_cookies"] + snap["logout_http"] + snap["errores"]
+    logging.info(
+        "Diagnostico sesiones Maximo | intentos=%d cerradas=%d "
+        "sin_cookies=%d logout_http=%d errores=%d | sin confirmar=%d",
+        snap["intentos"], snap["cerradas"], snap["sin_cookies"],
+        snap["logout_http"], snap["errores"], huerfanas,
+    )
+    if huerfanas:
+        logging.warning(
+            f"{huerfanas} sesion(es) Maximo pudieron quedar sin cerrar "
+            f"en esta corrida"
+        )
+    return snap
 
 
 def _obtener_href(wonum):
@@ -1412,23 +1498,120 @@ def listar_tickets_relacionados(ticketid, solo_clase=None):
             _cerrar_sesion(r2)
             
             
-# ══════════════════════════════════════════════════════════════
-# 12. CREAR INCIDENTE (+ OT automatica)
-# ══════════════════════════════════════════════════════════════
-#
-# Un unico POST a RESTINCIDENT crea el incidente Y, por configuracion
-# del lado de Maximo (createwomulti / classstructureid), genera
-# automaticamente la OT asociada en la misma ejecucion.
-#
-# Nosotros solo enviamos el JSON del incidente; Maximo se encarga
-# de crear la OT vinculada.
-#
-# Endpoint: POST http://.../maximo/oslc/os/RESTINCIDENT?lean=1
-# Auth:     restusr / restusr2023 (la misma _AUTH_INC)
-#
-# Segun instructivo de creacion de incidentes (Centro Gestion).
 
 def crear_incidente_con_ot(datos):
+    """
+    Crea un incidente en Maximo (objeto RESTINCIDENT). Por configuracion
+    del sistema, este POST genera ademas la OT asociada automaticamente.
+
+    Parametros:
+        datos (dict): campos del incidente a crear. Campos tipicos
+                      (segun instructivo Centro Gestion):
+            affecteddate                -> fecha de afectacion (ISO)
+            creationdate                -> fecha de creacion (ISO)
+            description                 -> titulo del incidente
+            reportedby                  -> quien reporta. Ej: "CENTROGESTION"
+            assetsiteid                 -> site del activo. Ej: "REDES"
+            assetorgid                  -> org del activo. Ej: "MOVISTAR"
+            externalsystem              -> sistema externo. Ej: "TT_API_CG"
+            severidad                   -> severidad (int). Ej: 3
+            impact                      -> impacto (int). Ej: 4
+            cinum                       -> CI principal. Ej: "GB0093"
+            description_longdescription -> descripcion larga
+            severidad_description       -> texto severidad. Ej: "MINOR"
+            ownergroup                  -> grupo responsable. Ej: "O_GESRED"
+            affectedstart               -> inicio de afectacion (ISO)
+            classificationid            -> clasificacion. Ej: "40.05"
+            classstructureid            -> estructura de clasif. Ej: "1887"
+            multiassetlocci             -> objeto/lista de elementos de red
+                                           afectados
+
+    Retorna:
+        dict con: success, message, status, ticket (ticketid creado),
+                  wonum (OT generada, si Maximo la devuelve), href, raw
+
+    Ejemplo de uso:
+        datos = {
+            "description": "Prueba incidente",
+            "reportedby": "CENTROGESTION",
+            "assetsiteid": "REDES",
+            "assetorgid": "MOVISTAR",
+            ...
+        }
+        resultado = crear_incidente(datos)
+        if resultado["success"]:
+            print(f"Incidente {resultado['ticket']} creado")
+    """
+    r = None
+    try:
+        r = requests.post(
+            f"{MAXIMO_INCIDENT_URL}?lean=1",
+            auth=_AUTH_INC,
+            headers={
+                "Content-Type": "application/json",
+                "properties":   "*",
+            },
+            json=datos,
+            timeout=TIMEOUT
+        )
+
+        if r.status_code in (200, 201):
+            data = r.json()
+            # Las claves del response vienen con prefijo "spi:"
+            ticketid = data.get("spi:ticketid") or data.get("ticketid", "")
+            href     = r.headers.get("Location", "")
+
+            # Maximo puede o no devolver el wonum de la OT generada en
+            # el response inmediato. Lo intentamos extraer; si no esta,
+            # quedara como "" y se consultara aparte.
+            wonum = (
+                data.get("spi:wonum")
+                or data.get("wonum")
+                or ""
+            )
+
+            logging.info(
+                f"Incidente creado: ticketid={ticketid}"
+                + (f", OT={wonum}" if wonum else " (OT generada por Maximo)")
+            )
+            return {
+                "success": True,
+                "message": f"Incidente {ticketid} creado correctamente",
+                "status":  "success",
+                "ticket":  ticketid,
+                "wonum":   wonum,
+                "href":    href,
+                "raw":     data,
+            }
+        else:
+            logging.error(
+                f"Error creando incidente HTTP {r.status_code}: {r.text[:500]}"
+            )
+            return {
+                "success": False,
+                "message": f"Error HTTP {r.status_code}",
+                "status":  "http_error",
+                "ticket":  None,
+                "wonum":   None,
+                "href":    "",
+                "raw":     None,
+            }
+
+    except Exception as e:
+        logging.error(f"Error creando incidente: {e}")
+        return {
+            "success": False,
+            "message": str(e),
+            "status":  "exception",
+            "ticket":  None,
+            "wonum":   None,
+            "href":    "",
+            "raw":     None,
+        }
+
+    finally:
+        if r is not None:
+            _cerrar_sesion(r)
     """
     Crea un incidente en Maximo (objeto RESTINCIDENT). Por configuracion
     del sistema, este POST genera ademas la OT asociada automaticamente.
